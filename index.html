@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>Mis Finanzas</title>
+  <meta name="theme-color" content="#1f6f5c">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="default">
+  <meta name="apple-mobile-web-app-title" content="Finanzas">
+  <link rel="manifest" href="manifest.webmanifest">
+  <link rel="icon" href="icons/icon-192.png">
+  <link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <div class="app">
+    <header class="top">
+      <h1 id="title">Inicio</h1>
+    </header>
+
+    <main id="view" tabindex="-1"></main>
+
+    <button class="fab" id="fab" data-act="add" aria-label="Anotar un gasto nuevo">
+      <span aria-hidden="true">+</span> Gasto
+    </button>
+
+    <nav class="tabs" aria-label="Secciones">
+      <a href="#/inicio" data-tab="inicio"><i aria-hidden="true">🏠</i><span>Inicio</span></a>
+      <a href="#/gastos" data-tab="gastos"><i aria-hidden="true">🧾</i><span>Gastos</span></a>
+      <a href="#/metas" data-tab="metas"><i aria-hidden="true">🎯</i><span>Metas</span></a>
+      <a href="#/cmr" data-tab="cmr"><i aria-hidden="true">💳</i><span>CMR</span></a>
+      <a href="#/plan" data-tab="plan"><i aria-hidden="true">⚙️</i><span>Plan</span></a>
+    </nav>
+  </div>
+
+  <div class="sheet" id="sheet" hidden>
+    <div class="sheet-bg" data-act="close"></div>
+    <div class="sheet-body" id="sheet-body" role="dialog" aria-modal="true"></div>
+  </div>
+
+  <div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
+
+  <input type="file" id="file-import" accept="application/json,.json" hidden>
+
+  <script src="app.js"></script>
+</body>
+</html>
