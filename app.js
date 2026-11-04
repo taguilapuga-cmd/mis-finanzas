@@ -44,7 +44,7 @@
     fixed: [],
     expenses: [],
     goals: [],
-    cmr: { fees: 0, items: [] },
+    cmr: { fees: 0, limit: 0, used: 0, usedAt: '', rate: 0, items: [], history: [], last: null },
     done: {},
     last: { cat: 'super', method: 'cc' },
   });
@@ -297,7 +297,37 @@
       <div class="kv"><span>Seguros y comisión</span><b class="num">${clp(fees)}</b></div>
       <div class="kv"><span>Compras con CMR anotadas</span><b class="num">${clp(purchases)}</b></div>
       <div class="kv total"><span>Estimado a pagar</span><b class="num">${clp(est)}</b></div>
-      <p class="small muted">Lo que compres desde el ${dlabel(addDays(close, 1))} entra al estado siguiente.</p></div>`;
+      <p class="small muted">Incluye solo lo que hayas anotado desde el ${dlabel(addDays(prev, 1))}; si usaste la CMR y no lo anotaste, el pago real será mayor. Lo que compres desde el ${dlabel(addDays(close, 1))} entra al estado siguiente.</p></div>`;
+
+    const c = S.cmr;
+    if (c.limit) {
+      const pct = Math.min(100, (c.used / c.limit) * 100);
+      h += `<div class="card"><h2>Tu cupo</h2>
+        <div class="kv"><span>Cupo total</span><b class="num">${clp(c.limit)}</b></div>
+        <div class="kv"><span>Usado${c.usedAt ? ' al ' + dlabel(parseYmd(c.usedAt)) : ''}</span><b class="num">${clp(c.used)} · ${Math.round(pct)}%</b></div>
+        <div class="bar" style="margin:6px 0 4px"><i style="width:${pct}%"></i></div>
+        <div class="kv"><span>Disponible</span><b class="num">${clp(c.limit - c.used)}</b></div>
+        ${c.rate ? `<div class="kv"><span>Interés mensual al comprar en cuotas</span><b>${String(c.rate).replace('.', ',')}%</b></div>` : ''}
+        <p class="small muted">El cupo usado incluye las cuotas futuras de lo que ya compraste.</p></div>`;
+    }
+
+    if (c.last && c.last.parts && c.last.parts.length) {
+      const L = c.last, mx = Math.max(...L.parts.map((x) => x.amount));
+      h += `<div class="card"><h2>${esc(L.label)}</h2>
+        <div class="kv total"><span>Facturado</span><b class="num">${clp(L.billed)}</b></div>` +
+        L.parts.map((x) => `<div class="catrow"><div class="top2"><span>${esc(x.name)}</span><span class="num">${clp(x.amount)} · ${Math.round((x.amount / L.billed) * 100)}%</span></div>
+          <div class="bar"><i style="width:${(x.amount / mx) * 100}%"></i></div></div>`).join('') +
+        (L.min ? `<p class="small muted">Pago mínimo: ${clp(L.min)}. Pagar el total evita intereses.</p>` : '') + '</div>';
+    }
+
+    if (c.history && c.history.length > 1) {
+      const mx = Math.max(...c.history.map((x) => x.billed));
+      const first = c.history[0].billed, last = c.history[c.history.length - 1].billed;
+      h += `<div class="card"><h2>Lo que te han facturado</h2>` +
+        c.history.map((x) => `<div class="catrow"><div class="top2"><span>${esc(x.label)}</span><span class="num">${clp(x.billed)}</span></div>
+          <div class="bar"><i style="width:${(x.billed / mx) * 100}%"></i></div></div>`).join('') +
+        (first > 0 ? `<p class="small muted">${last >= first ? 'Subió' : 'Bajó'} ${Math.abs(Math.round(((last - first) / first) * 100))}% entre el primero y el último.</p>` : '') + '</div>';
+    }
 
     h += `<div class="card"><h2>Cuotas pendientes</h2>` +
       (items.length ? items.map((i) => `<div class="check"><div class="grow"><b>${esc(i.name)}</b><div class="small muted">vence ${dlabel(cmrDueDate(i.month))} ${cmrDueDate(i.month).getFullYear()}</div></div>
@@ -309,10 +339,21 @@
     return h;
   }
 
-  function vPlan() {
+  function planResult() {
     const s = S.settings;
     const { p } = budgetPeriod();
     const b = budget(p);
+    return `<h2>Resultado · período del ${dlabel(p.start)}</h2>
+      <div class="kv"><span>Sueldo</span><b class="num">${clp(b.income)}</b></div>
+      <div class="kv"><span>Gastos fijos</span><b class="num">-${fmt(b.fixed)}</b></div>
+      <div class="kv"><span>CMR (cuotas + seguros)</span><b class="num">-${fmt(b.cmr)}</b></div>
+      <div class="kv"><span>Ahorro (${s.savingsPct}%)</span><b class="num">-${fmt(b.saving)}</b></div>
+      <div class="kv total"><span>Para vivir</span><b class="num">${clp(b.living)}</b></div>
+      <div class="kv total"><span>Por semana</span><b class="num">${clp(b.weekly)}</b></div>`;
+  }
+
+  function vPlan() {
+    const s = S.settings;
     const inp = (label, path, val, extra = '') =>
       `<label class="field"><span>${label}</span><input data-set="${path}" ${extra} value="${esc(val)}"></label>`;
     let h = `<div class="card"><h2>Tu sueldo</h2>
@@ -329,18 +370,16 @@
     h += `<div class="card"><h2>Tarjeta CMR</h2>
       ${inp('Seguros y comisión mensual ($)', 'cmr.fees', S.cmr.fees ? fmt(S.cmr.fees) : '', 'inputmode="numeric"')}
       ${inp('Día de cierre del estado', 'settings.cmrClose', s.cmrClose, 'inputmode="numeric"')}
-      ${inp('Día de vencimiento', 'settings.cmrDue', s.cmrDue, 'inputmode="numeric"')}</div>`;
+      ${inp('Día de vencimiento', 'settings.cmrDue', s.cmrDue, 'inputmode="numeric"')}
+      ${inp('Cupo total ($)', 'cmr.limit', S.cmr.limit ? fmt(S.cmr.limit) : '', 'inputmode="numeric"')}
+      ${inp('Cupo utilizado al último cierre ($)', 'cmr.used', S.cmr.used ? fmt(S.cmr.used) : '', 'inputmode="numeric"')}
+      <label class="field"><span>Fecha de ese cierre</span><input type="date" data-set="cmr.usedAt" value="${esc(S.cmr.usedAt || '')}"></label>
+      ${inp('Tasa mensual por cuotas (%)', 'cmr.rate', S.cmr.rate || '', 'inputmode="decimal"')}</div>`;
 
     h += `<div class="card"><h2>Gasto hormiga</h2>
       ${inp('Se considera hormiga hasta ($)', 'settings.hormigaMax', fmt(s.hormigaMax), 'inputmode="numeric"')}</div>`;
 
-    h += `<div class="card"><h2>Resultado · período del ${dlabel(p.start)}</h2>
-      <div class="kv"><span>Sueldo</span><b class="num">${clp(b.income)}</b></div>
-      <div class="kv"><span>Gastos fijos</span><b class="num">-${fmt(b.fixed)}</b></div>
-      <div class="kv"><span>CMR (cuotas + seguros)</span><b class="num">-${fmt(b.cmr)}</b></div>
-      <div class="kv"><span>Ahorro (${s.savingsPct}%)</span><b class="num">-${fmt(b.saving)}</b></div>
-      <div class="kv total"><span>Para vivir</span><b class="num">${clp(b.living)}</b></div>
-      <div class="kv total"><span>Por semana</span><b class="num">${clp(b.weekly)}</b></div></div>`;
+    h += `<div class="card" id="plan-result">${planResult()}</div>`;
 
     h += `<div class="card"><h2>Tus datos</h2><p class="small muted">Todo se guarda solo en este dispositivo. Haz un respaldo de vez en cuando.</p>
       <div class="row"><button class="btn small" data-act="export">Exportar</button><button class="btn small" data-act="import">Importar</button></div>
@@ -545,27 +584,40 @@
     }
   });
 
-  // Ajustes en la vista Plan (se guardan al salir del campo)
+  // Ajustes en la vista Plan: se guardan MIENTRAS escribes (en iPhone, tocar otra pestaña no "suelta" el campo
+  // y el evento change nunca llegaba, así que el sueldo se perdía).
+  const MONEY_KEYS = ['income', 'fees', 'hormigaMax', 'limit', 'used'];
+  const DAY_KEYS = ['payday', 'cmrClose', 'cmrDue'];
+
+  function applySetting(el, final) {
+    const [group, key] = el.dataset.set.split('.');
+    const target = group === 'cmr' ? S.cmr : S.settings;
+    let v;
+    if (key === 'planStart' || key === 'usedAt') v = el.value;
+    else if (key === 'rate') { v = parseFloat(String(el.value).replace(',', '.')); if (!isFinite(v) || v < 0) v = 0; }
+    else {
+      v = num(el.value);
+      if (DAY_KEYS.includes(key) && (v < 1 || v > 28)) { if (!final) return; v = Math.min(28, Math.max(1, v || 1)); el.value = v; }
+      if (key === 'savingsPct') v = Math.min(90, v);
+    }
+    target[key] = v;
+    if (key === 'income' && v > 0) S.settings.setupDone = true;
+    save();
+    const card = $('#plan-result');
+    if (card) card.innerHTML = planResult();
+  }
+
+  document.addEventListener('input', (e) => {
+    const el = e.target.closest('[data-set]');
+    if (!el) return;
+    if (MONEY_KEYS.includes(el.dataset.set.split('.')[1])) { const n = num(el.value); el.value = n ? fmt(n) : ''; }
+    applySetting(el, false);
+  });
   document.addEventListener('change', (e) => {
     const el = e.target.closest('[data-set]');
     if (!el) return;
-    const [group, key] = el.dataset.set.split('.');
-    const target = group === 'cmr' ? S.cmr : S.settings;
-    if (key === 'planStart') target[key] = el.value;
-    else {
-      let v = num(el.value);
-      if (key === 'payday' || key === 'cmrClose' || key === 'cmrDue') v = Math.min(28, Math.max(1, v || 1));
-      if (key === 'savingsPct') v = Math.min(90, v);
-      target[key] = v;
-    }
-    if (key === 'income' && S.settings.income > 0) S.settings.setupDone = true;
-    save(); render(true);
-  });
-  document.addEventListener('input', (e) => {
-    const el = e.target.closest('[data-set]');
-    if (el && (el.dataset.set === 'settings.income' || el.dataset.set === 'cmr.fees' || el.dataset.set === 'settings.hormigaMax')) {
-      const n = num(el.value); el.value = n ? fmt(n) : '';
-    }
+    applySetting(el, true);
+    toast('Guardado');
   });
   document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeSheet(); });
 
