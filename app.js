@@ -44,7 +44,7 @@
   /* ---------- Estado ---------- */
   const defaults = () => ({
     v: 1,
-    settings: { payday: 21, income: 0, savingsPct: 35, hormigaMax: 10000, cmrClose: 9, cmrDue: 25, planStart: '', setupDone: false, bridgeAmount: 0, bridgeAt: 0, bonusTithePct: 10, bonusMetasPct: 50, bonusAhorroPct: 30 },
+    settings: { payday: 21, income: 0, savingsPct: 35, hormigaMax: 10000, cmrClose: 9, cmrDue: 25, planStart: '', setupDone: false, bridgeAmount: 0, bridgeAt: 0, bonusTithePct: 10, bonusMetasPct: 50, bonusAhorroPct: 30, theme: 'verde' },
     bonuses: [],
     cats: [],
     fixed: [],
@@ -78,6 +78,15 @@
   const save = () => { try { localStorage.setItem(KEY, JSON.stringify(S)); } catch (e) { toast('No pude guardar en este navegador'); } };
 
   const G = { mode: 'lista', off: 0 }; // estado de la vista Gastos
+
+  // Temas de color (los estilos están en styles.css según <html data-theme>)
+  const THEMES = { verde: { name: '🌿 Verde', meta: '#1f6f5c' }, otono: { name: '🍂 Otoño', meta: '#bf5b05' } };
+  function applyTheme() {
+    const t = THEMES[S.settings.theme] ? S.settings.theme : 'verde';
+    document.documentElement.dataset.theme = t;
+    const m = document.querySelector('meta[name="theme-color"]');
+    if (m) m.setAttribute('content', THEMES[t].meta);
+  }
 
   /* ---------- Periodos y presupuesto ---------- */
   function periodAt(offset = 0, ref = new Date()) {
@@ -497,7 +506,9 @@
     const s = S.settings;
     const inp = (label, path, val, extra = '') =>
       `<label class="field"><span>${label}</span><input data-set="${path}" ${extra} value="${esc(val)}"></label>`;
-    let h = `<div class="card"><h2>Tu sueldo</h2>
+    let h = `<div class="card"><h2>Apariencia</h2><div class="chips">${Object.entries(THEMES).map(([id, t]) =>
+      `<button type="button" class="chip" data-act="theme" data-id="${id}" aria-pressed="${(THEMES[s.theme] ? s.theme : 'verde') === id}">${t.name}</button>`).join('')}</div></div>
+      <div class="card"><h2>Tu sueldo</h2>
       ${inp('Sueldo líquido mensual ($)', 'settings.income', s.income ? fmt(s.income) : '', 'inputmode="numeric"')}
       ${inp('Día de pago (1 a 28)', 'settings.payday', s.payday, 'inputmode="numeric"')}
       ${inp('Porcentaje a ahorro (%)', 'settings.savingsPct', s.savingsPct, 'inputmode="numeric"')}
@@ -557,6 +568,7 @@
   function render(keepScroll) {
     const r = route();
     const y = window.scrollY;
+    applyTheme();
     $('#title').textContent = TITLES[r];
     $('#view').innerHTML = views[r]();
     document.querySelectorAll('.tabs a').forEach((a) => {
@@ -837,6 +849,7 @@
         if (c && confirm('¿Borrar la etiqueta "' + c.name + '"? Los gastos que ya la usan pasarán a "Otros".')) { S.cats = S.cats.filter((x) => x.id !== id); save(); render(true); }
         break;
       }
+      case 'theme': if (THEMES[id]) { S.settings.theme = id; save(); render(true); } break;
       case 'bonus-new': editBonus(); break;
       case 'bonus-edit': editBonus(S.bonuses.find((x) => x.id === id)); break;
       case 'bonus-part': applyBonusPart(id, el.dataset.key); break;
