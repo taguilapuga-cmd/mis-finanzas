@@ -37,12 +37,15 @@
   const mlabel = (ym) => { const [y, m] = ym.split('-').map(Number); return MONTHS[m - 1] + ' ' + y; };
   const allCats = () => CATS.slice(0, -1).concat(S && S.cats ? S.cats : [], CATS.slice(-1)); // "Otros" siempre al final
   const catOf = (id) => allCats().find((c) => c.id === id) || CATS[CATS.length - 1];
-  const methodOf = (id) => METHODS.find((m) => m.id === id) || METHODS[0];
+  const BOLSA = { id: 'bolsa', name: 'Bolsa de gustos' }; // el 20% libre de los bonos
+  const methodOf = (id) => METHODS.concat(BOLSA).find((m) => m.id === id) || METHODS[0];
+  const methodsList = () => (S && S.bonuses && S.bonuses.length ? METHODS.concat(BOLSA) : METHODS);
 
   /* ---------- Estado ---------- */
   const defaults = () => ({
     v: 1,
-    settings: { payday: 21, income: 0, savingsPct: 35, hormigaMax: 10000, cmrClose: 9, cmrDue: 25, planStart: '', setupDone: false, bridgeAmount: 0, bridgeAt: 0 },
+    settings: { payday: 21, income: 0, savingsPct: 35, hormigaMax: 10000, cmrClose: 9, cmrDue: 25, planStart: '', setupDone: false, bridgeAmount: 0, bridgeAt: 0, bonusTithePct: 10, bonusMetasPct: 50, bonusAhorroPct: 30 },
+    bonuses: [],
     cats: [],
     fixed: [],
     expenses: [],
@@ -62,6 +65,7 @@
       cmr: { ...d.cmr, ...(raw.cmr || {}) },
       last: { ...d.last, ...(raw.last || {}) },
       cats: raw.cats || [],
+      bonuses: raw.bonuses || [],
       fixed: raw.fixed || [],
       expenses: raw.expenses || [],
       goals: raw.goals || [],
@@ -122,7 +126,56 @@
   const total = (arr) => arr.reduce((s, e) => s + e.amount, 0);
   // Lo que una compra "pesa" en tu presupuesto: si fue en cuotas, solo la primera; las demás se descuentan los meses siguientes.
   const cost = (e) => (e.cuotas > 1 && e.cuota ? e.cuota : e.amount);
-  const livingExp = (e) => !catOf(e.cat).fixed; // las categorías fijas (luz, agua…) no descuentan de tu semana
+  // Las categorías fijas (luz, agua…) y lo pagado con la bolsa de gustos de los bonos no descuentan de tu semana
+  const livingExp = (e) => !catOf(e.cat).fixed && e.method !== 'bolsa';
+
+  /* Bonos trimestrales: se reparten aparte; el plan mensual sigue usando solo tu sueldo normal */
+  function bonusParts(b) {
+    const s = S.settings;
+    const diezmo = Math.round((b.amount * s.bonusTithePct) / 100);
+    const rest = b.amount - diezmo;
+    const metas = Math.round((rest * s.bonusMetasPct) / 100);
+    const ahorro = Math.round((rest * s.bonusAhorroPct) / 100);
+    return { diezmo, metas, ahorro, libre: rest - metas - ahorro };
+  }
+  // Reparte un monto entre las metas de un grupo, en proporción a su aporte mensual (o por igual si ninguna tiene)
+  function distribute(amount, group) {
+    const gl = S.goals.filter((g) => (g.group || 'ahorro') === group);
+    if (!gl.length) return null;
+    let w = gl.map((g) => g.monthly || 0);
+    if (!w.reduce((a, x) => a + x, 0)) w = gl.map(() => 1);
+    const tw = w.reduce((a, x) => a + x, 0);
+    let left = amount;
+    const out = {};
+    gl.forEach((g, i) => { const v = i === gl.length - 1 ? left : Math.round((amount * w[i]) / tw); out[g.id] = v; left -= v; });
+    return out;
+  }
+  const stashBalance = () =>
+    S.bonuses.reduce((s, b) => s + ((b.done && b.done.libre) || 0), 0) - S.expenses.filter((e) => e.method === 'bolsa').reduce((s, e) => s + e.amount, 0);
+
+  function applyBonusPart(id, key) {
+    const b = S.bonuses.find((x) => x.id === id);
+    if (!b) return;
+    b.done = b.done || {};
+    if (b.done[key]) return;
+    const amount = bonusParts(b)[key];
+    if (key === 'metas' || key === 'ahorro') {
+      const dist = distribute(amount, key === 'metas' ? 'meta' : 'ahorro');
+      if (!dist) { toast('Marca al menos una meta como "' + (key === 'metas' ? 'Meta' : 'Ahorro') + '" en Metas → Editar'); return; }
+      Object.entries(dist).forEach(([gid, v]) => { const g = S.goals.find((x) => x.id === gid); if (g) g.saved += v; });
+      b.done[key] = dist;
+    } else b.done[key] = amount;
+    save(); render(true);
+    const label = { diezmo: 'Diezmo', metas: 'Metas', ahorro: 'Ahorro', libre: 'Bolsa de gustos' }[key];
+    toast(`${label}: ${clp(amount)} anotado`, () => undoBonusPart(id, key));
+  }
+  function undoBonusPart(id, key) {
+    const b = S.bonuses.find((x) => x.id === id);
+    if (!b || !b.done || !b.done[key]) return;
+    if (key === 'metas' || key === 'ahorro') Object.entries(b.done[key]).forEach(([gid, v]) => { const g = S.goals.find((x) => x.id === gid); if (g) g.saved -= v; });
+    delete b.done[key];
+    save(); render(true);
+  }
   const spendIn = (a, b) => expIn(a, b, livingExp).reduce((s, e) => s + cost(e), 0);
 
   /* Cuotas de la CMR: en qué mes vence la primera cuota de una compra y generación de las siguientes */
@@ -217,6 +270,21 @@
       }
     }
 
+    // Bonos trimestrales (se reparten aparte del plan mensual)
+    const nowYm = now.getFullYear() + '-' + pad(now.getMonth() + 1);
+    [...S.bonuses].sort((a, b2) => a.month.localeCompare(b2.month)).forEach((bn) => {
+      const pr = bonusParts(bn), dn = bn.done || {}, keys = ['diezmo', 'metas', 'ahorro', 'libre'];
+      if (keys.every((k) => dn[k])) return;
+      const arrived = bn.month <= nowYm;
+      const names = { diezmo: 'Diezmo (' + S.settings.bonusTithePct + '%)', metas: 'Metas: vacaciones, cámara, moto', ahorro: 'Ahorro: emergencia, casa, APV', libre: 'Bolsa de gustos (libre)' };
+      const btn = { diezmo: 'Entregado', metas: 'Transferido', ahorro: 'Transferido', libre: 'A mi bolsa' };
+      h += `<div class="card"><h2>${arrived ? 'Llegó tu bono' : 'Próximo bono'} · ${mlabel(bn.month)}</h2>
+        <div class="kv total"><span>${esc(bn.note || 'Monto extra')}</span><b class="num">${clp(bn.amount)}</b></div>` +
+        keys.map((k) => `<div class="check"><div class="grow"><b>${esc(names[k])}</b></div><b class="num">${clp(pr[k])}</b>` +
+          (dn[k] ? '<span class="tag ok">✓ listo</span>' : arrived ? `<button class="btn small" data-act="bonus-part" data-id="${bn.id}" data-key="${k}">${btn[k]}</button>` : '') + '</div>').join('') +
+        (arrived ? '' : '<p class="small muted">Reparto estimado. Cuando llegue el bono, aquí marcas cada parte.</p>') + '</div>';
+    });
+
     // Gasto hormiga
     const thr = S.settings.hormigaMax;
     const all = expIn(cur.start, cur.end, livingExp);
@@ -295,7 +363,7 @@
       <div class="kv"><span>Suman</span><b class="num">${clp(total(small))}</b></div>
       <div class="kv"><span>Promedio por compra</span><b class="num">${small.length ? clp(total(small) / small.length) : '$0'}</b></div></div>`;
 
-    h += '<div class="card"><h2>Según cómo pagaste</h2>' + METHODS.map((m) => {
+    h += '<div class="card"><h2>Según cómo pagaste</h2>' + methodsList().map((m) => {
       const v = total(list.filter((e) => e.method === m.id));
       return `<div class="kv"><span>${esc(m.name)}</span><b class="num">${clp(v)}</b></div>`;
     }).join('') + '</div>';
@@ -316,6 +384,10 @@
     const monthly = S.goals.reduce((a, g) => a + (g.monthly || 0), 0);
     let h = `<div class="card"><h2>Tus ahorros</h2><div class="kv"><span>Total en metas</span><b class="num">${clp(saved)}</b></div>
       <div class="kv"><span>Ahorro mensual planificado</span><b class="num">${clp(monthly)}</b></div></div>`;
+    if (S.bonuses.length) {
+      h += `<div class="card"><h2>Bolsa de gustos</h2><div class="kv total"><span>Disponible</span><b class="num">${clp(stashBalance())}</b></div>
+        <p class="small muted">Viene del 20% libre de tus bonos. Para gastar de aquí elige "Bolsa de gustos" al anotar un gasto; no descuenta de tu semana.</p></div>`;
+    }
     if (!S.goals.length) h += '<p class="empty">Aún no tienes metas.<br>Agrega la primera: vacaciones, cámara, emergencia…</p>';
 
     h += S.goals.map((g) => {
@@ -454,6 +526,18 @@
 
     h += `<div class="card" id="plan-result">${planResult()}</div>`;
 
+    const libre = 100 - s.bonusMetasPct - s.bonusAhorroPct;
+    h += `<div class="card"><h2>Bonos trimestrales</h2>
+      <p class="small muted">Anota el monto <b>extra</b> que llega sobre tu sueldo normal. El plan mensual no cambia: el bono se reparte aparte.</p>` +
+      (S.bonuses.length ? [...S.bonuses].sort((a, b2) => a.month.localeCompare(b2.month)).map((bn) => `<div class="check"><div class="grow"><b>${mlabel(bn.month)}</b><div class="small muted">${esc(bn.note || '')}</div></div>
+        <b class="num">${clp(bn.amount)}</b><button class="btn small" data-act="bonus-edit" data-id="${bn.id}">Editar</button></div>`).join('') : '<p class="muted small">Aún no anotaste ningún bono.</p>') +
+      '<div class="row"><button class="btn small" data-act="bonus-new">+ Anotar bono</button></div>' +
+      `<div class="lbl">Cómo se reparte</div>
+      ${inp('Diezmo del bono (%)', 'settings.bonusTithePct', s.bonusTithePct, 'inputmode="numeric"')}
+      ${inp('A metas (% de lo que queda)', 'settings.bonusMetasPct', s.bonusMetasPct, 'inputmode="numeric"')}
+      ${inp('A ahorro (% de lo que queda)', 'settings.bonusAhorroPct', s.bonusAhorroPct, 'inputmode="numeric"')}
+      <p class="small ${libre < 0 ? 'bad-text' : 'muted'}" style="${libre < 0 ? 'color:var(--bad)' : ''}">${libre < 0 ? 'Metas + ahorro pasan de 100%.' : `Libre para gustos: ${libre}%`}</p></div>`;
+
     h += `<div class="card"><h2>Tus etiquetas de gasto</h2>
       <p class="small muted">Crea las tuyas desde <b>+ Gasto → ＋ Etiqueta</b>. Las <b>fijas</b> (luz, agua…) se anotan pero no descuentan de tu semana, porque ya están en tus gastos fijos.</p>` +
       (S.cats.length ? S.cats.map((c) => `<div class="check"><div class="grow"><b>${esc(c.ico)} ${esc(c.name)}</b> <span class="badge">${c.fixed ? 'fija' : 'variable'}</span></div>
@@ -523,7 +607,7 @@
       <label class="amt-in"><span>$</span><input id="f-amt" inputmode="numeric" autocomplete="off" placeholder="0" aria-label="Monto" value="${existing ? fmt(existing.amount) : ''}"></label>
       <div class="lbl">Etiqueta</div><div class="chips" id="f-cats">${allCats().map((c) => chip('cat', c.id, esc(c.ico) + ' ' + esc(c.name), c.id === st.cat)).join('')}<button type="button" class="chip" data-newcat="1">＋ Etiqueta</button></div>
       <p class="small muted" id="f-cat-hint" style="margin:6px 2px 0"></p>
-      <div class="lbl">Pagué con</div><div class="chips" id="f-methods">${METHODS.map((m) => chip('method', m.id, esc(m.name), m.id === st.method)).join('')}</div>
+      <div class="lbl">Pagué con</div><div class="chips" id="f-methods">${methodsList().map((m) => chip('method', m.id, esc(m.name), m.id === st.method)).join('')}</div>
       <div id="f-cmr-box" hidden>
         <div class="lbl">¿En cuántas cuotas?</div>
         <div class="chips">${[1, 2, 3, 6, 12, 18, 24].map((n) => chip('n', n, n === 1 ? 'Sin cuotas' : n, n === st.n)).join('')}</div>
@@ -628,15 +712,18 @@
   }
 
   // Formulario genérico para metas, fijos y cuotas
-  function openForm({ title, fields, onSave, onDelete }) {
-    openSheet(`<h2>${esc(title)}</h2>` + fields.map((f) =>
-      `<label class="field"><span>${esc(f.label)}</span><input id="ff-${f.key}" type="${f.type || 'text'}" ${f.money ? 'inputmode="numeric" autocomplete="off"' : ''} placeholder="${esc(f.ph || '')}" value="${esc(f.money ? (f.value ? fmt(f.value) : '') : f.value == null ? '' : f.value)}"></label>`).join('') +
+  function openForm({ title, fields, onSave, onDelete, validate }) {
+    openSheet(`<h2>${esc(title)}</h2>` + fields.map((f) => f.options
+      ? `<label class="field"><span>${esc(f.label)}</span><select id="ff-${f.key}">${f.options.map(([val, lab]) => `<option value="${esc(val)}" ${val === f.value ? 'selected' : ''}>${esc(lab)}</option>`).join('')}</select></label>`
+      : `<label class="field"><span>${esc(f.label)}</span><input id="ff-${f.key}" type="${f.type || 'text'}" ${f.money ? 'inputmode="numeric" autocomplete="off"' : ''} placeholder="${esc(f.ph || '')}" value="${esc(f.money ? (f.value ? fmt(f.value) : '') : f.value == null ? '' : f.value)}"></label>`).join('') +
       `<div class="row">${onDelete ? '<button class="btn danger" id="ff-del">Eliminar</button>' : '<button class="btn" data-act="close">Cancelar</button>'}<button class="btn primary" id="ff-save">Guardar</button></div>`);
     fields.filter((f) => f.money).forEach((f) => moneyInput($('#ff-' + f.key)));
     $('#ff-save').addEventListener('click', () => {
       const v = {};
       fields.forEach((f) => { const raw = $('#ff-' + f.key).value; v[f.key] = f.money ? num(raw) : raw.trim(); });
       if (fields[0] && fields[0].required && !v[fields[0].key]) { toast('Falta el nombre'); return; }
+      const problem = validate ? validate(v) : '';
+      if (problem) { toast(problem); return; }
       onSave(v); save(); closeSheet(); render(true);
     });
     if (onDelete) $('#ff-del').addEventListener('click', () => { if (confirm('¿Eliminar?')) { onDelete(); save(); closeSheet(); render(true); } });
@@ -651,8 +738,9 @@
       { key: 'monthly', label: 'Aporte mensual ($)', money: true, value: g && g.monthly },
       { key: 'deadline', label: 'Fecha límite (opcional)', type: 'month', value: g && g.deadline },
       { key: 'account', label: 'Dónde está la plata', value: g && g.account, ph: 'Ej: Platino BancoEstado' },
+      { key: 'group', label: 'Tipo (para repartir tus bonos)', value: g ? g.group || 'ahorro' : 'ahorro', options: [['ahorro', 'Ahorro: emergencia, casa, APV…'], ['meta', 'Meta: vacaciones, cámara, moto…']] },
     ],
-    onSave: (v) => { const rec = { id: g ? g.id : uid(), ...v }; S.goals = g ? S.goals.map((x) => (x.id === g.id ? rec : x)) : [...S.goals, rec]; },
+    onSave: (v) => { const rec = { ...(g || {}), id: g ? g.id : uid(), ...v }; S.goals = g ? S.goals.map((x) => (x.id === g.id ? rec : x)) : [...S.goals, rec]; },
     onDelete: g ? () => { S.goals = S.goals.filter((x) => x.id !== g.id); } : null,
   });
 
@@ -672,8 +760,23 @@
         { key: 'amount', label: 'Monto de la cuota ($)', money: true, value: c && c.amount },
         { key: 'month', label: 'Mes de vencimiento', type: 'month', value: c ? c.month : d.getFullYear() + '-' + pad(d.getMonth() + 1) },
       ],
-      onSave: (v) => { const rec = { id: c ? c.id : uid(), ...v }; S.cmr.items = c ? S.cmr.items.map((x) => (x.id === c.id ? rec : x)) : [...S.cmr.items, rec]; },
+      onSave: (v) => { const rec = { ...(c || {}), id: c ? c.id : uid(), ...v }; S.cmr.items = c ? S.cmr.items.map((x) => (x.id === c.id ? rec : x)) : [...S.cmr.items, rec]; },
       onDelete: c ? () => { S.cmr.items = S.cmr.items.filter((x) => x.id !== c.id); } : null,
+    });
+  };
+
+  const editBonus = (bn) => {
+    const d = new Date();
+    openForm({
+      title: bn ? 'Editar bono' : 'Anotar bono',
+      fields: [
+        { key: 'note', label: 'Nota (opcional)', value: bn && bn.note, ph: 'Ej: Bono 3er trimestre (estimado)' },
+        { key: 'month', label: 'Mes en que llega', type: 'month', value: bn ? bn.month : d.getFullYear() + '-' + pad(d.getMonth() + 1) },
+        { key: 'amount', label: 'Monto EXTRA sobre tu sueldo normal ($)', money: true, value: bn && bn.amount },
+      ],
+      validate: (v) => (!v.amount ? 'Escribe el monto extra' : !v.month ? 'Elige el mes' : ''),
+      onSave: (v) => { const rec = { ...(bn || {}), id: bn ? bn.id : uid(), ...v }; S.bonuses = bn ? S.bonuses.map((x) => (x.id === bn.id ? rec : x)) : [...S.bonuses, rec]; },
+      onDelete: bn ? () => { S.bonuses = S.bonuses.filter((x) => x.id !== bn.id); } : null,
     });
   };
 
@@ -734,6 +837,9 @@
         if (c && confirm('¿Borrar la etiqueta "' + c.name + '"? Los gastos que ya la usan pasarán a "Otros".')) { S.cats = S.cats.filter((x) => x.id !== id); save(); render(true); }
         break;
       }
+      case 'bonus-new': editBonus(); break;
+      case 'bonus-edit': editBonus(S.bonuses.find((x) => x.id === id)); break;
+      case 'bonus-part': applyBonusPart(id, el.dataset.key); break;
       case 'fixed-new': editFixed(); break;
       case 'fixed-edit': editFixed(S.fixed.find((x) => x.id === id)); break;
       case 'cmr-new': editCmr(); break;
@@ -761,6 +867,7 @@
       v = num(el.value);
       if (DAY_KEYS.includes(key) && (v < 1 || v > 28)) { if (!final) return; v = Math.min(28, Math.max(1, v || 1)); el.value = v; }
       if (key === 'savingsPct') v = Math.min(90, v);
+      if (['bonusTithePct', 'bonusMetasPct', 'bonusAhorroPct'].includes(key)) v = Math.min(100, v);
     }
     target[key] = v;
     if (key === 'income' && v > 0) S.settings.setupDone = true;
@@ -790,6 +897,21 @@
   render();
   if (startWithAdd) openExpense();
   document.addEventListener('visibilitychange', () => { if (!document.hidden && $('#sheet').hidden) render(true); });
+
+  // iPhone: ajusta la hoja al área realmente visible (el teclado no cambia el viewport normal) y muestra el campo enfocado
+  if (window.visualViewport) {
+    const vv = window.visualViewport;
+    const fit = () => {
+      const r = document.documentElement.style;
+      r.setProperty('--vvh', vv.height + 'px');
+      r.setProperty('--vvt', vv.offsetTop + 'px');
+    };
+    vv.addEventListener('resize', fit); vv.addEventListener('scroll', fit); fit();
+  }
+  $('#sheet-body').addEventListener('focusin', (e) => {
+    const t = e.target;
+    if (/^(INPUT|SELECT)$/.test(t.tagName)) setTimeout(() => t.scrollIntoView({ block: 'center', behavior: 'smooth' }), 250);
+  });
 
   if ('serviceWorker' in navigator && /^https?:$/.test(location.protocol) && location.hostname !== 'localhost') {
     navigator.serviceWorker.register('sw.js').catch(() => {});

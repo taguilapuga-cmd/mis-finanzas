@@ -1,39 +1,52 @@
+/* Paleta de otoño de la marca: #92780A (oliva), #BF7F04 (ámbar), #BF5B05 (naranjo quemado), #8C1C04 (óxido), #3F0E00 (café oscuro).
+   Los colores de la marca se usan tal cual en barras e íconos. Para TEXTO y relleno de botones se usan tonos apenas más oscuros
+   (--ok, --warn, --accent-text, --accent-fill) para que cumplan el contraste mínimo de lectura (4,5:1). */
 :root {
-  --bg: #f6f4ef;
+  --brand-olive: #92780a;
+  --brand-amber: #bf7f04;
+  --brand-orange: #bf5b05;
+  --brand-rust: #8c1c04;
+  --brand-brown: #3f0e00;
+
+  --bg: #fbf5ec;
   --card: #ffffff;
-  --text: #1f2a26;
-  --muted: #66736d;
-  --line: #e6e2d9;
-  --accent: #1f6f5c;
+  --text: #3f0e00;
+  --muted: #7a5648;
+  --line: #eadfcf;
+  --accent: #bf5b05;
+  --accent-fill: #b05004;
   --accent-ink: #ffffff;
-  --accent-soft: #ddefe8;
-  --ok: #1f7a4d;
-  --warn: #b45309;
-  --bad: #b42318;
-  --ok-soft: #e3f3ea;
-  --warn-soft: #fdf0d9;
-  --bad-soft: #fde8e6;
-  --shadow: 0 1px 2px rgba(31, 42, 38, .06), 0 4px 14px rgba(31, 42, 38, .05);
+  --accent-text: #9a4503;
+  --accent-soft: #f9e3d0;
+  --ok: #6b5805;
+  --warn: #8a5a00;
+  --bad: #8c1c04;
+  --ok-soft: #f2eccb;
+  --warn-soft: #fbe8c4;
+  --bad-soft: #f7dad2;
+  --shadow: 0 1px 2px rgba(63, 14, 0, .06), 0 4px 14px rgba(63, 14, 0, .06);
   --radius: 18px;
   --nav-h: 64px;
 }
 
 @media (prefers-color-scheme: dark) {
   :root {
-    --bg: #111715;
-    --card: #1a2220;
-    --text: #e8efec;
-    --muted: #9aaaa3;
-    --line: #2a3531;
-    --accent: #4fc3a1;
-    --accent-ink: #0c1512;
-    --accent-soft: #1d3a31;
-    --ok: #5fd39a;
-    --warn: #f0b35a;
-    --bad: #ff8a80;
-    --ok-soft: #173325;
-    --warn-soft: #3a2c12;
-    --bad-soft: #3d1c19;
+    --bg: #1e0a03;
+    --card: #2a130a;
+    --text: #f7ebdd;
+    --muted: #c9ae9b;
+    --line: #46281b;
+    --accent: #e8873a;
+    --accent-fill: #e8873a;
+    --accent-ink: #2a0c00;
+    --accent-text: #f0a367;
+    --accent-soft: #4a2511;
+    --ok: #d8bc52;
+    --warn: #f2b552;
+    --bad: #ff9a82;
+    --ok-soft: #3b3411;
+    --warn-soft: #4b3411;
+    --bad-soft: #4d1c12;
     --shadow: none;
   }
 }
@@ -68,19 +81,19 @@ main { flex: 1; padding: 8px 16px calc(var(--nav-h) + env(safe-area-inset-bottom
   color: var(--muted); text-decoration: none; font-size: 12px; font-weight: 600;
 }
 .tabs a i { font-style: normal; font-size: 21px; filter: grayscale(1); opacity: .75; }
-.tabs a[aria-current="page"] { color: var(--accent); }
+.tabs a[aria-current="page"] { color: var(--accent-text); }
 .tabs a[aria-current="page"] i { filter: none; opacity: 1; }
 
 .fab {
-  position: fixed; z-index: 21; right: 16px;
+  position: fixed; z-index: 21; right: max(16px, env(safe-area-inset-right));
   bottom: calc(var(--nav-h) + env(safe-area-inset-bottom) + 14px);
   display: inline-flex; align-items: center; gap: 8px;
   height: 56px; padding: 0 22px 0 18px; border: 0; border-radius: 28px;
-  background: var(--accent); color: var(--accent-ink);
-  font-weight: 700; font-size: 17px; box-shadow: 0 6px 20px rgba(31, 111, 92, .35);
+  background: var(--accent-fill); color: var(--accent-ink);
+  font-weight: 700; font-size: 17px; box-shadow: 0 6px 20px rgba(191, 91, 5, .35);
 }
 .fab span { font-size: 28px; line-height: 1; margin-top: -2px; }
-body.sheet-open .fab { display: none; }
+body.sheet-open .fab, .fab[hidden] { display: none; } /* el atributo hidden no ganaba a display:inline-flex */
 
 /* Cards */
 .card { background: var(--card); border-radius: var(--radius); padding: 16px; margin: 12px 0; box-shadow: var(--shadow); }
@@ -104,8 +117,9 @@ body.sheet-open .fab { display: none; }
 .bar { height: 10px; border-radius: 6px; background: rgba(0, 0, 0, .09); overflow: hidden; }
 @media (prefers-color-scheme: dark) { .bar { background: rgba(255, 255, 255, .12); } }
 .bar > i { display: block; height: 100%; border-radius: 6px; background: var(--accent); }
-.hero.warn .bar > i { background: var(--warn); }
-.hero.bad .bar > i { background: var(--bad); }
+.hero.ok .bar > i { background: var(--brand-olive); }
+.hero.warn .bar > i { background: var(--brand-amber); }
+.hero.bad .bar > i { background: var(--brand-rust); }
 
 .kv { display: flex; justify-content: space-between; gap: 12px; padding: 7px 0; border-bottom: 1px solid var(--line); }
 .kv:last-child { border-bottom: 0; }
@@ -123,7 +137,7 @@ body.sheet-open .fab { display: none; }
 .item .t { font-weight: 650; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .item .s { font-size: 13px; color: var(--muted); }
 .item .amt { font-weight: 750; font-variant-numeric: tabular-nums; }
-.badge { display: inline-block; font-size: 11.5px; font-weight: 700; padding: 1px 8px; border-radius: 10px; background: var(--accent-soft); color: var(--accent); }
+.badge { display: inline-block; font-size: 11.5px; font-weight: 700; padding: 1px 8px; border-radius: 10px; background: var(--accent-soft); color: var(--accent-text); }
 .badge.cmr { background: var(--warn-soft); color: var(--warn); }
 
 /* Segmented + period nav */
@@ -142,7 +156,7 @@ body.sheet-open .fab { display: none; }
 
 /* Buttons */
 .btn { height: 48px; padding: 0 18px; border-radius: 14px; border: 1px solid var(--line); background: var(--card); font-weight: 700; }
-.btn.primary { background: var(--accent); color: var(--accent-ink); border-color: transparent; }
+.btn.primary { background: var(--accent-fill); color: var(--accent-ink); border-color: transparent; }
 .btn.danger { color: var(--bad); }
 .btn.small { height: 38px; padding: 0 14px; font-size: 14px; border-radius: 12px; }
 .btn.block { width: 100%; }
@@ -150,14 +164,20 @@ body.sheet-open .fab { display: none; }
 .row .btn { flex: 1; }
 
 /* Sheet */
-.sheet { position: fixed; inset: 0; z-index: 50; display: flex; align-items: flex-end; justify-content: center; }
+/* La hoja se ajusta al viewport visual (con teclado en iPhone); --vvh/--vvt los pone app.js. Sin ellos, pantalla completa. */
+.sheet { position: fixed; left: 0; right: 0; bottom: 0; top: var(--vvt, 0px); height: var(--vvh, 100dvh); z-index: 50; display: flex; align-items: flex-end; justify-content: center; }
+body.sheet-open { overflow: hidden; }
+.sheet-bg { touch-action: none; }
 .sheet[hidden] { display: none; }
 .sheet-bg { position: absolute; inset: 0; background: rgba(0, 0, 0, .45); }
 .sheet-body {
-  position: relative; width: 100%; max-width: 560px; max-height: 92vh; overflow-y: auto;
-  background: var(--bg); border-radius: 24px 24px 0 0; padding: 20px 18px calc(env(safe-area-inset-bottom) + 20px);
+  position: relative; width: 100%; max-width: 560px; max-height: 92%; overflow-y: auto;
+  overscroll-behavior: contain; -webkit-overflow-scrolling: touch; scroll-padding-bottom: 96px;
+  background: var(--bg); border-radius: 24px 24px 0 0; padding: 20px 18px calc(env(safe-area-inset-bottom) + 12px);
   animation: up .18s ease-out;
 }
+/* Los botones Guardar/Cancelar siempre quedan a la vista, aunque el formulario sea largo o salga el teclado */
+.sheet-body .row:last-child { position: sticky; bottom: -1px; background: var(--bg); padding: 10px 0 4px; margin-top: 10px; }
 @keyframes up { from { transform: translateY(40px); opacity: .4; } to { transform: none; opacity: 1; } }
 .sheet-body h2 { margin: 0 0 12px; font-size: 20px; }
 
@@ -168,14 +188,16 @@ body.sheet-open .fab { display: none; }
 .lbl { margin: 14px 2px 6px; font-size: 13px; font-weight: 700; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; }
 .chips { display: flex; flex-wrap: wrap; gap: 8px; }
 .chip { height: 42px; padding: 0 14px; border-radius: 21px; border: 1.5px solid var(--line); background: var(--card); font-weight: 650; }
-.chip[aria-pressed="true"] { border-color: var(--accent); background: var(--accent-soft); color: var(--accent); }
+.chip[aria-pressed="true"] { border-color: var(--accent); background: var(--accent-soft); color: var(--accent-text); }
 
 .field { display: block; margin: 12px 0; }
 .field > span { display: block; margin: 0 2px 6px; font-size: 13px; font-weight: 700; color: var(--muted); }
 .field input, .field select {
   width: 100%; height: 48px; padding: 0 14px; border-radius: 12px; border: 1.5px solid var(--line); background: var(--card);
 }
-.field input:focus { border-color: var(--accent); outline: none; }
+.field input:focus, .field select:focus { border-color: var(--accent); outline: none; }
+.field input, .field select { -webkit-appearance: none; appearance: none; min-width: 0; max-width: 100%; }
+.field input[type="date"], .field input[type="month"] { display: block; text-align: left; }
 
 /* Goals */
 .goal .head { display: flex; justify-content: space-between; align-items: baseline; gap: 10px; }
@@ -195,10 +217,13 @@ body.sheet-open .fab { display: none; }
 .toast {
   position: fixed; z-index: 60; left: 50%; transform: translateX(-50%);
   bottom: calc(var(--nav-h) + env(safe-area-inset-bottom) + 84px);
-  width: min(92vw, 480px); background: #1f2a26; color: #fff; border-radius: 14px; padding: 12px 14px;
+  width: min(92vw, 480px); background: #3f0e00; color: #fff; border: 1px solid rgba(255, 255, 255, .14); border-radius: 14px; padding: 12px 14px;
   display: flex; align-items: center; justify-content: space-between; gap: 12px; box-shadow: 0 8px 24px rgba(0, 0, 0, .3);
 }
 .toast[hidden] { display: none; }
-.toast button { background: none; border: 0; color: #8be0c4; font-weight: 800; padding: 6px 4px; }
+/* Con una hoja abierta el aviso va arriba para no tapar el formulario */
+body.sheet-open .toast { bottom: auto; top: calc(env(safe-area-inset-top) + 12px); }
+.pill { display: inline-block; padding: 2px 9px; border-radius: 10px; font-size: 12px; font-weight: 700; background: var(--accent-soft); color: var(--accent-text); }
+.toast button { background: none; border: 0; color: #f2b552; font-weight: 800; padding: 6px 4px; }
 
 @media (prefers-reduced-motion: reduce) { .sheet-body { animation: none; } }
