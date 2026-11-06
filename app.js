@@ -10,6 +10,7 @@
     { id: 'bencina', name: 'Bencina', ico: '⛽' },
     { id: 'gustos', name: 'Gustos', ico: '🎧' },
     { id: 'salud', name: 'Salud', ico: '💊' },
+    { id: 'cuentas', name: 'Cuentas básicas', ico: '💡', fixed: true }, // luz, agua, internet: ya están en tus gastos fijos
     { id: 'otros', name: 'Otros', ico: '✨' },
   ];
   const METHODS = [
@@ -34,13 +35,15 @@
   const parseYmd = (s) => { const [y, m, d] = s.split('-').map(Number); return new Date(y, m - 1, d); };
   const dlabel = (d) => d.getDate() + ' ' + MONTHS[d.getMonth()];
   const mlabel = (ym) => { const [y, m] = ym.split('-').map(Number); return MONTHS[m - 1] + ' ' + y; };
-  const catOf = (id) => CATS.find((c) => c.id === id) || CATS[CATS.length - 1];
+  const allCats = () => CATS.slice(0, -1).concat(S && S.cats ? S.cats : [], CATS.slice(-1)); // "Otros" siempre al final
+  const catOf = (id) => allCats().find((c) => c.id === id) || CATS[CATS.length - 1];
   const methodOf = (id) => METHODS.find((m) => m.id === id) || METHODS[0];
 
   /* ---------- Estado ---------- */
   const defaults = () => ({
     v: 1,
-    settings: { payday: 21, income: 0, savingsPct: 35, hormigaMax: 10000, cmrClose: 9, cmrDue: 25, planStart: '', setupDone: false },
+    settings: { payday: 21, income: 0, savingsPct: 35, hormigaMax: 10000, cmrClose: 9, cmrDue: 25, planStart: '', setupDone: false, bridgeAmount: 0, bridgeAt: 0 },
+    cats: [],
     fixed: [],
     expenses: [],
     goals: [],
@@ -58,6 +61,7 @@
       settings: { ...d.settings, ...(raw.settings || {}) },
       cmr: { ...d.cmr, ...(raw.cmr || {}) },
       last: { ...d.last, ...(raw.last || {}) },
+      cats: raw.cats || [],
       fixed: raw.fixed || [],
       expenses: raw.expenses || [],
       goals: raw.goals || [],
@@ -94,17 +98,51 @@
   const cmrDueIn = (p) =>
     S.cmr.items.filter((it) => { const d = cmrDueDate(it.month); return d >= p.start && d < p.end; }).reduce((a, i) => a + i.amount, 0) + (S.cmr.fees || 0);
 
+  // Compras con CMR hechas ANTES de que parta el plan: se pagan con el sueldo nuevo (p. ej. el 25 de nov) y no se descontaron de ningún período del plan.
+  function carryIn(p) {
+    if (!S.settings.planStart) return 0;
+    const ps = +parseYmd(S.settings.planStart);
+    return S.expenses.filter((e) => e.method === 'cmr' && e.ts < ps).filter((e) => {
+      const d = cmrDueDate(stmtDueMonth(new Date(e.ts)));
+      return d >= p.start && d < p.end;
+    }).reduce((s, e) => s + cost(e), 0);
+  }
+
   function budget(p) {
     const income = S.settings.income;
     const fixed = S.fixed.reduce((a, f) => a + f.amount, 0);
     const cmr = cmrDueIn(p);
+    const carry = carryIn(p);
     const saving = Math.round((income * S.settings.savingsPct) / 100);
-    const living = income - fixed - cmr - saving;
-    return { income, fixed, cmr, saving, living, weekly: living / (p.days / 7) };
+    const living = income - fixed - cmr - carry - saving;
+    return { income, fixed, cmr, carry, saving, living, weekly: living / (p.days / 7) };
   }
 
   const expIn = (a, b, f) => S.expenses.filter((e) => e.ts >= +a && e.ts < +b && (!f || f(e)));
   const total = (arr) => arr.reduce((s, e) => s + e.amount, 0);
+  // Lo que una compra "pesa" en tu presupuesto: si fue en cuotas, solo la primera; las demás se descuentan los meses siguientes.
+  const cost = (e) => (e.cuotas > 1 && e.cuota ? e.cuota : e.amount);
+  const livingExp = (e) => !catOf(e.cat).fixed; // las categorías fijas (luz, agua…) no descuentan de tu semana
+  const spendIn = (a, b) => expIn(a, b, livingExp).reduce((s, e) => s + cost(e), 0);
+
+  /* Cuotas de la CMR: en qué mes vence la primera cuota de una compra y generación de las siguientes */
+  function addMonths(ym, k) { const [y, m] = ym.split('-').map(Number); const d = new Date(y, m - 1 + k, 1); return d.getFullYear() + '-' + pad(d.getMonth() + 1); }
+  function stmtDueMonth(d) {
+    const cd = S.settings.cmrClose;
+    let c = new Date(d.getFullYear(), d.getMonth(), cd);
+    if (sod(d) > c) c = new Date(d.getFullYear(), d.getMonth() + 1, cd);
+    if (S.settings.cmrDue <= cd) c = new Date(c.getFullYear(), c.getMonth() + 1, 1);
+    return c.getFullYear() + '-' + pad(c.getMonth() + 1);
+  }
+  function syncCuotaItems(rec) {
+    S.cmr.items = S.cmr.items.filter((i) => i.expId !== rec.id);
+    if (rec.method === 'cmr' && rec.cuotas > 1) {
+      const base = stmtDueMonth(new Date(rec.ts));
+      for (let k = 1; k < rec.cuotas; k++) {
+        S.cmr.items.push({ id: uid(), expId: rec.id, name: (rec.note || catOf(rec.cat).name) + ' ' + (k + 1) + '/' + rec.cuotas, amount: rec.cuota, month: addMonths(base, k) });
+      }
+    }
+  }
   const weekStart = (d = new Date()) => addDays(sod(d), -((sod(d).getDay() + 6) % 7));
 
   /* ---------- Vistas ---------- */
@@ -120,22 +158,42 @@
       h += `<div class="card"><h2>Empecemos</h2><p>Configura tu sueldo, tus gastos fijos y tu ahorro para calcular cuánta plata tienes por semana.</p>
         <div class="row"><a class="btn primary" style="display:grid;place-items:center;text-decoration:none" href="#/plan">Ir a Plan</a></div></div>`;
     } else {
-      const ws = weekStart(), spentW = total(expIn(ws, addDays(ws, 7)));
-      const left = b.weekly - spentW;
-      const pct = b.weekly > 0 ? Math.min(100, Math.max(0, (spentW / b.weekly) * 100)) : 100;
-      const cls = left < 0 ? 'bad' : left < b.weekly * 0.2 ? 'warn' : 'ok';
-      h += `<section class="hero ${cls}" aria-label="Dinero que te queda esta semana">
-          <p class="eyebrow">${preview ? 'Vista previa de tu plan · ' : ''}Te quedan esta semana</p>
-          <p class="big">${clp(left)}</p>
-          <div class="bar"><i style="width:${pct}%"></i></div>
-          <p class="sub">Gastaste ${clp(spentW)} de ${clp(b.weekly)} (lunes a domingo)</p>
-        </section>`;
+      const ws = weekStart(), spentW = spendIn(ws, addDays(ws, 7));
+      const bridge = S.settings.bridgeAmount;
+      let bridgeCmrNote = '';
+      if (preview && bridge > 0) {
+        // Antes de que parta el plan: la plata libre real hasta el día de pago
+        // Solo lo que sale de tu cuenta ahora; las compras con CMR se pagan el 25 con el sueldo nuevo
+        const spentB = expIn(S.settings.bridgeAt || 0, Infinity, (e) => livingExp(e) && e.method !== 'cmr').reduce((s, e) => s + cost(e), 0);
+        const cmrB = expIn(S.settings.bridgeAt || 0, Infinity, (e) => livingExp(e) && e.method === 'cmr').reduce((s, e) => s + cost(e), 0);
+        bridgeCmrNote = cmrB > 0 ? `<p class="small muted">Compraste ${clp(cmrB)} con CMR: se pagan el ${S.settings.cmrDue} con tu sueldo nuevo y ya los descontamos de tu plan.</p>` : '';
+        const leftB = bridge - spentB;
+        const pctB = Math.min(100, Math.max(0, (spentB / bridge) * 100));
+        const clsB = leftB < 0 ? 'bad' : leftB < bridge * 0.2 ? 'warn' : 'ok';
+        h += `<section class="hero ${clsB}" aria-label="Plata libre hasta el día de pago">
+            <p class="eyebrow">Te quedan hasta el ${dlabel(addDays(p.start, -1))}</p>
+            <p class="big">${clp(leftB)}</p>
+            <div class="bar"><i style="width:${pctB}%"></i></div>
+            <p class="sub">≈ ${clp(Math.max(0, leftB) / Math.max(1, daysToStart))} por día · gastaste ${clp(spentB)} de ${clp(bridge)}</p>
+          </section>`;
+      } else {
+        const left = b.weekly - spentW;
+        const pct = b.weekly > 0 ? Math.min(100, Math.max(0, (spentW / b.weekly) * 100)) : 100;
+        const cls = left < 0 ? 'bad' : left < b.weekly * 0.2 ? 'warn' : 'ok';
+        h += `<section class="hero ${cls}" aria-label="Dinero que te queda esta semana">
+            <p class="eyebrow">${preview ? 'Vista previa de tu plan · ' : ''}Te quedan esta semana</p>
+            <p class="big">${clp(left)}</p>
+            <div class="bar"><i style="width:${pct}%"></i></div>
+            <p class="sub">Gastaste ${clp(spentW)} de ${clp(b.weekly)} (lunes a domingo)</p>
+          </section>`;
+      }
 
       if (preview) {
         h += `<div class="card"><h2>Tu plan parte el ${dlabel(p.start)}</h2>
-          <p>Faltan <b>${daysToStart}</b> ${daysToStart === 1 ? 'día' : 'días'}. Mientras tanto anota cada gasto para conocer tu ritmo real.</p></div>`;
+          <p>Faltan <b>${daysToStart}</b> ${daysToStart === 1 ? 'día' : 'días'}. ${bridge > 0 ? `Desde ese día tendrás <b>${clp(b.weekly)}</b> por semana.` : 'En <b>Plan</b> anota la plata libre que te queda hasta entonces para ver cuánto puedes gastar por día.'}</p>
+          ${bridgeCmrNote}<p class="small muted">No transfieras tu ahorro antes: el primer aporte es el día que cae el sueldo.</p></div>`;
       } else {
-        const spentP = total(expIn(p.start, p.end));
+        const spentP = spendIn(p.start, p.end);
         const leftP = b.living - spentP;
         const daysLeft = Math.max(1, Math.ceil((p.end - sod(now)) / 864e5));
         h += `<div class="card"><h2>Hasta el ${dlabel(addDays(p.end, -1))}</h2>
@@ -161,7 +219,7 @@
 
     // Gasto hormiga
     const thr = S.settings.hormigaMax;
-    const all = expIn(cur.start, cur.end);
+    const all = expIn(cur.start, cur.end, livingExp);
     const small = all.filter((e) => e.amount <= thr);
     h += `<div class="card"><h2>Gasto hormiga · período actual</h2>` +
       (all.length
@@ -201,10 +259,11 @@
           h += `<div class="day">${esc(lab)}</div>`;
         }
         const c = catOf(e.cat);
+        const cuotaTxt = e.cuotas > 1 ? ` · ${e.cuotas} cuotas de ${clp(e.cuota)}${e.interest > 0 ? ' (interés ' + clp(e.interest) + ')' : ''}` : '';
         h += `<button class="item" data-act="edit-exp" data-id="${e.id}">
           <span class="ico" aria-hidden="true">${c.ico}</span>
           <span class="grow"><span class="t" style="display:block">${esc(e.note || c.name)}</span>
-            <span class="s">${esc(c.name)} · <span class="badge ${e.method === 'cmr' ? 'cmr' : ''}">${esc(methodOf(e.method).name)}</span></span></span>
+            <span class="s">${esc(c.name)} · <span class="badge ${e.method === 'cmr' ? 'cmr' : ''}">${esc(methodOf(e.method).name)}</span>${c.fixed ? ' <span class="badge">fijo</span>' : ''}${esc(cuotaTxt)}</span></span>
           <span class="amt">${clp(e.amount)}</span></button>`;
       }
       return h;
@@ -221,8 +280,17 @@
       rows.map(([id, v]) => `<div class="catrow"><div class="top2"><span>${catOf(id).ico} ${esc(catOf(id).name)}</span><span class="num">${clp(v)} · ${Math.round((v / tot) * 100)}%</span></div>
         <div class="bar"><i style="width:${(v / max) * 100}%"></i></div></div>`).join('') + '</div>';
 
+    const fixedTot = total(list.filter((e) => !livingExp(e)));
+    const cuotasList = list.filter((e) => e.cuotas > 1);
+    if (fixedTot || cuotasList.length) {
+      h += '<div class="card"><h2>Detalle</h2>' +
+        (fixedTot ? `<div class="kv"><span>Gastos fijos (no descuentan de tu semana)</span><b class="num">${clp(fixedTot)}</b></div>` : '') +
+        (cuotasList.length ? `<div class="kv"><span>Compras en cuotas</span><b>${cuotasList.length}</b></div>
+          <div class="kv"><span>Intereses que pagarás por esas cuotas</span><b class="num">${clp(cuotasList.reduce((s, e) => s + (e.interest || 0), 0))}</b></div>` : '') + '</div>';
+    }
+
     const thr = S.settings.hormigaMax;
-    const small = list.filter((e) => e.amount <= thr);
+    const small = list.filter((e) => livingExp(e) && e.amount <= thr);
     h += `<div class="card"><h2>Hormiga (${clp(thr)} o menos)</h2><div class="kv"><span>Compras</span><b>${small.length}</b></div>
       <div class="kv"><span>Suman</span><b class="num">${clp(total(small))}</b></div>
       <div class="kv"><span>Promedio por compra</span><b class="num">${small.length ? clp(total(small) / small.length) : '$0'}</b></div></div>`;
@@ -284,7 +352,7 @@
     let close = new Date(now.getFullYear(), now.getMonth(), cd);
     if (sod(now) > close) close = new Date(now.getFullYear(), now.getMonth() + 1, cd);
     const prev = new Date(close.getFullYear(), close.getMonth() - 1, cd);
-    const purchases = total(expIn(addDays(prev, 1), addDays(close, 1), (e) => e.method === 'cmr'));
+    const purchases = expIn(addDays(prev, 1), addDays(close, 1), (e) => e.method === 'cmr').reduce((s, e) => s + cost(e), 0);
     const dueMonth = close.getFullYear() + '-' + pad(close.getMonth() + 1);
     const cuotas = items.filter((i) => i.month === dueMonth).reduce((a, i) => a + i.amount, 0);
     const fees = S.cmr.fees || 0;
@@ -347,6 +415,7 @@
       <div class="kv"><span>Sueldo</span><b class="num">${clp(b.income)}</b></div>
       <div class="kv"><span>Gastos fijos</span><b class="num">-${fmt(b.fixed)}</b></div>
       <div class="kv"><span>CMR (cuotas + seguros)</span><b class="num">-${fmt(b.cmr)}</b></div>
+      ${b.carry > 0 ? `<div class="kv"><span>CMR: compras antes del plan</span><b class="num">-${fmt(b.carry)}</b></div>` : ''}
       <div class="kv"><span>Ahorro (${s.savingsPct}%)</span><b class="num">-${fmt(b.saving)}</b></div>
       <div class="kv total"><span>Para vivir</span><b class="num">${clp(b.living)}</b></div>
       <div class="kv total"><span>Por semana</span><b class="num">${clp(b.weekly)}</b></div>`;
@@ -361,6 +430,10 @@
       ${inp('Día de pago (1 a 28)', 'settings.payday', s.payday, 'inputmode="numeric"')}
       ${inp('Porcentaje a ahorro (%)', 'settings.savingsPct', s.savingsPct, 'inputmode="numeric"')}
       <label class="field"><span>El plan parte el (opcional)</span><input type="date" data-set="settings.planStart" value="${esc(s.planStart)}"></label></div>`;
+
+    h += `<div class="card"><h2>Hasta que parta el plan</h2>
+      <p class="small muted">Plata que de verdad te queda libre hasta el día de pago. Descuenta lo ya comprometido (por ejemplo el diezmo). Inicio te dirá cuánto puedes gastar por día.</p>
+      ${inp('Plata libre hasta el día de pago ($)', 'settings.bridgeAmount', s.bridgeAmount ? fmt(s.bridgeAmount) : '', 'inputmode="numeric"')}</div>`;
 
     h += `<div class="card"><h2>Gastos fijos al mes</h2>` +
       (S.fixed.length ? S.fixed.map((f) => `<div class="check"><div class="grow"><b>${esc(f.name)}</b></div><b class="num">${clp(f.amount)}</b>
@@ -380,6 +453,12 @@
       ${inp('Se considera hormiga hasta ($)', 'settings.hormigaMax', fmt(s.hormigaMax), 'inputmode="numeric"')}</div>`;
 
     h += `<div class="card" id="plan-result">${planResult()}</div>`;
+
+    h += `<div class="card"><h2>Tus etiquetas de gasto</h2>
+      <p class="small muted">Crea las tuyas desde <b>+ Gasto → ＋ Etiqueta</b>. Las <b>fijas</b> (luz, agua…) se anotan pero no descuentan de tu semana, porque ya están en tus gastos fijos.</p>` +
+      (S.cats.length ? S.cats.map((c) => `<div class="check"><div class="grow"><b>${esc(c.ico)} ${esc(c.name)}</b> <span class="badge">${c.fixed ? 'fija' : 'variable'}</span></div>
+        <button class="btn small" data-act="cat-toggle" data-id="${c.id}">Hacerla ${c.fixed ? 'variable' : 'fija'}</button>
+        <button class="btn small danger" data-act="cat-del" data-id="${c.id}">Borrar</button></div>`).join('') : '<p class="muted small">Aún no creaste etiquetas propias.</p>') + '</div>';
 
     h += `<div class="card"><h2>Tus datos</h2><p class="small muted">Todo se guarda solo en este dispositivo. Haz un respaldo de vez en cuando.</p>
       <div class="row"><button class="btn small" data-act="export">Exportar</button><button class="btn small" data-act="import">Importar</button></div>
@@ -430,44 +509,121 @@
 
   /* ---------- Formularios ---------- */
   function openExpense(existing) {
-    const st = { cat: existing ? existing.cat : S.last.cat, method: existing ? existing.method : S.last.method };
+    const st = {
+      cat: existing ? existing.cat : S.last.cat,
+      method: existing ? existing.method : S.last.method,
+      n: existing && existing.cuotas > 1 ? existing.cuotas : 1,
+      interest: existing && existing.cuotas > 1 ? existing.interest > 0 : true,
+      cuotaManual: !!(existing && existing.cuotas > 1),
+    };
+    if (!allCats().some((c) => c.id === st.cat)) st.cat = 'otros';
     const dateVal = ymd(existing ? new Date(existing.ts) : new Date());
-    openSheet(`<h2>${existing ? 'Editar gasto' : 'Nuevo gasto'}</h2>
+    const chip = (attr, val, label, on) => `<button type="button" class="chip" data-${attr}="${val}" aria-pressed="${on}">${label}</button>`;
+    openSheet(`<h2>${existing ? 'Editar gasto' : 'Nuevo gasto'}</h2><div id="exp-form">
       <label class="amt-in"><span>$</span><input id="f-amt" inputmode="numeric" autocomplete="off" placeholder="0" aria-label="Monto" value="${existing ? fmt(existing.amount) : ''}"></label>
-      <div class="lbl">Categoría</div><div class="chips" id="f-cats">${CATS.map((c) => `<button type="button" class="chip" data-cat="${c.id}" aria-pressed="${c.id === st.cat}">${c.ico} ${esc(c.name)}</button>`).join('')}</div>
-      <div class="lbl">Pagué con</div><div class="chips" id="f-methods">${METHODS.map((m) => `<button type="button" class="chip" data-method="${m.id}" aria-pressed="${m.id === st.method}">${esc(m.name)}</button>`).join('')}</div>
+      <div class="lbl">Etiqueta</div><div class="chips" id="f-cats">${allCats().map((c) => chip('cat', c.id, esc(c.ico) + ' ' + esc(c.name), c.id === st.cat)).join('')}<button type="button" class="chip" data-newcat="1">＋ Etiqueta</button></div>
+      <p class="small muted" id="f-cat-hint" style="margin:6px 2px 0"></p>
+      <div class="lbl">Pagué con</div><div class="chips" id="f-methods">${METHODS.map((m) => chip('method', m.id, esc(m.name), m.id === st.method)).join('')}</div>
+      <div id="f-cmr-box" hidden>
+        <div class="lbl">¿En cuántas cuotas?</div>
+        <div class="chips">${[1, 2, 3, 6, 12, 18, 24].map((n) => chip('n', n, n === 1 ? 'Sin cuotas' : n, n === st.n)).join('')}</div>
+        <div id="f-int-box" hidden>
+          <div class="lbl">¿Con interés?</div>
+          <div class="chips">${chip('int', 1, 'Con interés', st.interest)}${chip('int', 0, 'Sin interés (0%)', !st.interest)}</div>
+          <label class="field"><span>Valor de cada cuota ($)</span><input id="f-cuota" inputmode="numeric" autocomplete="off" value="${existing && existing.cuotas > 1 ? fmt(existing.cuota) : ''}"></label>
+          <p class="small muted" id="f-cuota-hint" style="margin:-4px 2px 0"></p>
+        </div>
+      </div>
       <label class="field" style="margin-top:14px"><span>Nota (opcional)</span><input id="f-note" maxlength="60" placeholder="Ej: almuerzo, Uber a casa…" value="${esc(existing ? existing.note : '')}"></label>
       <label class="field"><span>Fecha</span><input id="f-date" type="date" value="${dateVal}"></label>
-      <div class="row">${existing ? '<button class="btn danger" id="f-del">Eliminar</button>' : '<button class="btn" data-act="close">Cancelar</button>'}<button class="btn primary" id="f-save">Guardar</button></div>`);
-    const body = $('#sheet-body');
-    const amt = $('#f-amt'); moneyInput(amt);
+      <div class="row">${existing ? '<button class="btn danger" id="f-del">Eliminar</button>' : '<button class="btn" data-act="close">Cancelar</button>'}<button class="btn primary" id="f-save">Guardar</button></div></div>`);
+
+    const form = $('#exp-form');
+    const amt = $('#f-amt'), cuotaIn = $('#f-cuota'), hint = $('#f-cuota-hint');
+    moneyInput(amt); moneyInput(cuotaIn);
     if (!existing) setTimeout(() => amt.focus(), 60);
-    const pick = (sel, attr, key) => body.querySelectorAll(sel).forEach((b) => b.addEventListener('click', () => {
-      st[key] = b.dataset[attr];
-      body.querySelectorAll(sel).forEach((x) => x.setAttribute('aria-pressed', String(x === b)));
-    }));
-    pick('[data-cat]', 'cat', 'cat'); pick('[data-method]', 'method', 'method');
+    const mark = (sel, on) => form.querySelectorAll(sel).forEach((x) => x.setAttribute('aria-pressed', String(x === on)));
+
+    // Cuota estimada: sin interés = precio / n; con interés = cuota de un crédito a la tasa mensual que anotaste en Plan
+    const estimate = () => {
+      const P = num(amt.value), n = st.n;
+      if (!P || n < 2) return 0;
+      const i = (S.cmr.rate || 0) / 100;
+      if (!st.interest || i <= 0) return Math.ceil(P / n);
+      return Math.round((P * i) / (1 - Math.pow(1 + i, -n)));
+    };
+    const refresh = () => {
+      const isCmr = st.method === 'cmr';
+      $('#f-cmr-box').hidden = !isCmr;
+      $('#f-int-box').hidden = !(isCmr && st.n > 1);
+      if (isCmr && st.n > 1) {
+        if (!st.cuotaManual) { const est = estimate(); cuotaIn.value = est ? fmt(est) : ''; }
+        const P = num(amt.value), c = num(cuotaIn.value);
+        if (P && c) {
+          const tot = c * st.n, it = tot - P;
+          hint.textContent = `Pagarás ${st.n} × ${clp(c)} = ${clp(tot)}` + (it > 0 ? ` · intereses ${clp(it)} (${((it / P) * 100).toFixed(1).replace('.', ',')}%)` : ' · sin intereses') +
+            '. Para tu semana cuenta solo la primera cuota; las demás se descuentan en los meses siguientes.' +
+            (st.interest && !(S.cmr.rate > 0) ? ' Anota la tasa mensual en Plan o escribe la cuota real que te muestra Falabella.' : '');
+        } else hint.textContent = '';
+      }
+      const c = catOf(st.cat);
+      $('#f-cat-hint').textContent = c.fixed ? 'Gasto fijo: se anota, pero no descuenta de tu dinero de la semana.' : '';
+    };
+    refresh();
+
+    form.addEventListener('click', (ev) => {
+      const b = ev.target.closest('button');
+      if (!b) return;
+      if (b.dataset.cat) { st.cat = b.dataset.cat; mark('[data-cat]', b); refresh(); }
+      else if (b.dataset.method) { st.method = b.dataset.method; mark('[data-method]', b); refresh(); }
+      else if (b.dataset.n) { st.n = Number(b.dataset.n); st.cuotaManual = false; mark('[data-n]', b); refresh(); }
+      else if (b.dataset.int) { st.interest = b.dataset.int === '1'; st.cuotaManual = false; mark('[data-int]', b); refresh(); }
+      else if (b.dataset.newcat) {
+        const name = (prompt('Nombre de la etiqueta (ej: Luz, Agua, Gas, Peluquería)') || '').trim();
+        if (!name) return;
+        const fixed = confirm('¿Es un gasto fijo del plan, como luz, agua o internet?\n\nAceptar = sí: se anota pero NO descuenta de tu dinero de la semana (ya está en tus gastos fijos).\nCancelar = no: descuenta de tu semana.');
+        const cat = { id: 'c_' + uid(), name: name.slice(0, 24), ico: fixed ? '🧾' : '🏷️', fixed };
+        S.cats.push(cat); save();
+        const nb = document.createElement('button');
+        nb.type = 'button'; nb.className = 'chip'; nb.dataset.cat = cat.id; nb.textContent = cat.ico + ' ' + cat.name;
+        const wrap = $('#f-cats'); wrap.insertBefore(nb, wrap.querySelector('[data-newcat]'));
+        st.cat = cat.id; mark('[data-cat]', nb); refresh();
+      }
+    });
+    amt.addEventListener('input', refresh);
+    cuotaIn.addEventListener('input', () => { st.cuotaManual = true; refresh(); });
 
     $('#f-save').addEventListener('click', () => {
       const amount = num(amt.value);
       if (!amount) { amt.focus(); toast('Escribe el monto'); return; }
+      const n = st.method === 'cmr' ? st.n : 1;
+      let cuota = 0, interest = 0;
+      if (n > 1) {
+        cuota = num(cuotaIn.value) || estimate();
+        if (!cuota) { cuotaIn.focus(); toast('Escribe el valor de la cuota'); return; }
+        interest = Math.max(0, cuota * n - amount);
+      }
       const d = parseYmd($('#f-date').value || ymd(new Date()));
       const now = new Date();
       const ts = ymd(d) === ymd(now) ? +now : +new Date(d.getFullYear(), d.getMonth(), d.getDate(), 12);
-      const rec = { id: existing ? existing.id : uid(), ts: existing && ymd(new Date(existing.ts)) === ymd(d) ? existing.ts : ts, amount, cat: st.cat, method: st.method, note: $('#f-note').value.trim() };
+      const rec = { id: existing ? existing.id : uid(), ts: existing && ymd(new Date(existing.ts)) === ymd(d) ? existing.ts : ts, amount, cat: st.cat, method: st.method, note: $('#f-note').value.trim(), cuotas: n, cuota, interest };
       if (existing) S.expenses = S.expenses.map((e) => (e.id === existing.id ? rec : e)); else S.expenses.push(rec);
+      syncCuotaItems(rec);
       S.last = { cat: st.cat, method: st.method };
       save(); closeSheet(); render(true);
-      const { p } = budgetPeriod(), b = budget(p), ws = weekStart();
-      const left = b.weekly - total(expIn(ws, addDays(ws, 7)));
-      toast(S.settings.income > 0 ? `Guardado ${clp(amount)} · te quedan ${clp(left)} esta semana` : `Guardado ${clp(amount)}`,
-        existing ? null : () => { S.expenses = S.expenses.filter((e) => e.id !== rec.id); save(); render(true); });
+      const { p, preview } = budgetPeriod(), b = budget(p), ws = weekStart();
+      const left = b.weekly - spendIn(ws, addDays(ws, 7));
+      const what = n > 1 ? `${clp(amount)} en ${n} cuotas de ${clp(cuota)}` : clp(amount);
+      toast(S.settings.income > 0 && !(preview && S.settings.bridgeAmount > 0) ? `Guardado ${what} · te quedan ${clp(left)} esta semana` : `Guardado ${what}`,
+        existing ? null : () => { S.expenses = S.expenses.filter((e) => e.id !== rec.id); S.cmr.items = S.cmr.items.filter((i) => i.expId !== rec.id); save(); render(true); });
     });
     const del = $('#f-del');
     if (del) del.addEventListener('click', () => {
-      const old = existing;
-      S.expenses = S.expenses.filter((e) => e.id !== old.id); save(); closeSheet(); render(true);
-      toast('Gasto eliminado', () => { S.expenses.push(old); save(); render(true); });
+      const old = existing, oldItems = S.cmr.items.filter((i) => i.expId === old.id);
+      S.expenses = S.expenses.filter((e) => e.id !== old.id);
+      S.cmr.items = S.cmr.items.filter((i) => i.expId !== old.id);
+      save(); closeSheet(); render(true);
+      toast('Gasto eliminado', () => { S.expenses.push(old); S.cmr.items.push(...oldItems); save(); render(true); });
     });
   }
 
@@ -572,6 +728,12 @@
         toast(`Anotado: ${clp(g.monthly)} a ${g.name}`, () => { g.saved -= g.monthly; S.done[pk] = S.done[pk].filter((x) => x !== g.id); save(); render(true); });
         break;
       }
+      case 'cat-toggle': { const c = S.cats.find((x) => x.id === id); if (c) { c.fixed = !c.fixed; c.ico = c.fixed ? '🧾' : '🏷️'; save(); render(true); } break; }
+      case 'cat-del': {
+        const c = S.cats.find((x) => x.id === id);
+        if (c && confirm('¿Borrar la etiqueta "' + c.name + '"? Los gastos que ya la usan pasarán a "Otros".')) { S.cats = S.cats.filter((x) => x.id !== id); save(); render(true); }
+        break;
+      }
       case 'fixed-new': editFixed(); break;
       case 'fixed-edit': editFixed(S.fixed.find((x) => x.id === id)); break;
       case 'cmr-new': editCmr(); break;
@@ -586,7 +748,7 @@
 
   // Ajustes en la vista Plan: se guardan MIENTRAS escribes (en iPhone, tocar otra pestaña no "suelta" el campo
   // y el evento change nunca llegaba, así que el sueldo se perdía).
-  const MONEY_KEYS = ['income', 'fees', 'hormigaMax', 'limit', 'used'];
+  const MONEY_KEYS = ['income', 'fees', 'hormigaMax', 'limit', 'used', 'bridgeAmount'];
   const DAY_KEYS = ['payday', 'cmrClose', 'cmrDue'];
 
   function applySetting(el, final) {
@@ -602,6 +764,7 @@
     }
     target[key] = v;
     if (key === 'income' && v > 0) S.settings.setupDone = true;
+    if (key === 'bridgeAmount') S.settings.bridgeAt = Date.now(); // desde este momento se descuentan los gastos
     save();
     const card = $('#plan-result');
     if (card) card.innerHTML = planResult();
