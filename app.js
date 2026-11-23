@@ -609,7 +609,7 @@
         const s = planStatus(pl), pct = (s.paid / pl.n) * 100, tot = pl.value * pl.n, it = pl.price ? tot - pl.price : 0;
         return `<details class="plan"><summary>
             <div class="check" style="border:0;padding:6px 0"><div class="grow"><b>${esc(pl.name)}</b>
-              <div class="small muted">${pl.n} cuotas de ${clp(pl.value)}${it > 0 ? ' · interés ' + clp(it) : ''}</div></div>
+              <div class="small muted">${pl.n} cuotas de ${clp(pl.value)}${it > pl.n ? ' · interés ' + clp(it) : ''}</div></div>
               <b class="num">${s.left ? 'Faltan ' + s.left : '✓ Terminada'}</b></div>
             <div class="bar"><i style="width:${pct}%"></i></div>
             <div class="small muted" style="margin-top:4px">Pagadas ${s.paid} de ${pl.n}${s.left ? ` · faltan ${clp(s.leftAmount)}${s.next ? ' · próxima el ' + dlabel(cmrDueDate(s.next.month)) : ''}` : ''}</div></summary>
@@ -746,7 +746,7 @@
       cat: existing ? existing.cat : S.last.cat,
       method: existing ? existing.method : S.last.method,
       n: existing && existing.cuotas > 1 ? existing.cuotas : 1,
-      interest: existing && existing.cuotas > 1 ? existing.interest > 0 : true,
+      interest: existing && existing.cuotas > 1 ? existing.interest > 0 : false, // por defecto: monto ÷ cuotas (sin interés)
       cuotaManual: !!(existing && existing.cuotas > 1),
     };
     if (!allCats().some((c) => c.id === st.cat)) st.cat = 'otros';
@@ -761,10 +761,11 @@
         <label class="field"><span>Cantidad de cuotas (1 = sin cuotas)</span><input id="f-n" inputmode="numeric" autocomplete="off" value="${st.n}"></label>
         <div class="chips">${[1, 2, 3, 6, 12, 18, 24].map((n) => chip('n', n, n === 1 ? 'Sin cuotas' : n, n === st.n)).join('')}</div>
         <div id="f-int-box" hidden>
-          <div class="lbl">¿Con interés?</div>
-          <div class="chips">${chip('int', 1, 'Con interés', st.interest)}${chip('int', 0, 'Sin interés (0%)', !st.interest)}</div>
-          <label class="field"><span>Valor de cada cuota ($)</span><input id="f-cuota" inputmode="numeric" autocomplete="off" value="${existing && existing.cuotas > 1 ? fmt(existing.cuota) : ''}"></label>
+          <label class="field"><span>Valor de cada cuota ($) · se calcula solo, o escríbelo tú</span><input id="f-cuota" inputmode="numeric" autocomplete="off" value="${existing && existing.cuotas > 1 ? fmt(existing.cuota) : ''}"></label>
           <p class="small muted" id="f-cuota-hint" style="margin:-4px 2px 0"></p>
+          <button type="button" class="btn small" id="f-auto" hidden style="margin-top:8px">Volver al cálculo automático</button>
+          <div class="lbl">Si la tienda cobra interés</div>
+          <div class="chips">${chip('int', 0, 'Dividir en partes iguales', !st.interest)}${chip('int', 1, 'Estimar con interés', st.interest)}</div>
         </div>
       </div>
       <label class="field" style="margin-top:14px"><span>Nota (opcional)</span><input id="f-note" maxlength="60" placeholder="Ej: almuerzo, Uber a casa…" value="${esc(existing ? existing.note : '')}"></label>
@@ -782,7 +783,7 @@
       const P = num(amt.value), n = st.n;
       if (!P || n < 2) return 0;
       const i = (S.cmr.rate || 0) / 100;
-      if (!st.interest || i <= 0) return Math.ceil(P / n);
+      if (!st.interest || i <= 0) return Math.round(P / n);
       return Math.round((P * i) / (1 - Math.pow(1 + i, -n)));
     };
     const refresh = () => {
@@ -792,11 +793,13 @@
       if (isCmr && st.n > 1) {
         if (!st.cuotaManual) { const est = estimate(); cuotaIn.value = est ? fmt(est) : ''; }
         const P = num(amt.value), c = num(cuotaIn.value);
+        $('#f-auto').hidden = !st.cuotaManual;
         if (P && c) {
-          const tot = c * st.n, it = tot - P;
-          hint.textContent = `Pagarás ${st.n} × ${clp(c)} = ${clp(tot)}` + (it > 0 ? ` · intereses ${clp(it)} (${((it / P) * 100).toFixed(1).replace('.', ',')}%)` : ' · sin intereses') +
+          const tot = c * st.n, it = tot - P, real = it > st.n; // una diferencia de redondeo no cuenta como interés
+          hint.textContent = (st.cuotaManual ? 'Valor escrito por ti. ' : st.interest && S.cmr.rate > 0 ? `Estimado con interés (${String(S.cmr.rate).replace('.', ',')}% mensual). ` : 'Calculado solo: monto ÷ cuotas. ') +
+            `Pagarás ${st.n} × ${clp(c)} = ${clp(tot)}` + (real ? ` · intereses ${clp(it)} (${((it / P) * 100).toFixed(1).replace('.', ',')}%)` : ' · sin intereses') +
             '. Para tu semana cuenta solo la primera cuota; las demás se descuentan en los meses siguientes.' +
-            (st.interest && !(S.cmr.rate > 0) ? ' Anota la tasa mensual en Plan o escribe la cuota real que te muestra Falabella.' : '');
+            (!st.cuotaManual && st.interest && !(S.cmr.rate > 0) ? ' Anota la tasa mensual en Plan o escribe la cuota real que te muestra Falabella.' : '');
         } else hint.textContent = '';
       }
       const c = catOf(st.cat);
@@ -834,6 +837,7 @@
     });
     $('#f-n').addEventListener('blur', () => { st.typingN = false; $('#f-n').value = st.n; refresh(); });
     cuotaIn.addEventListener('input', () => { st.cuotaManual = true; refresh(); });
+    $('#f-auto').addEventListener('click', () => { st.cuotaManual = false; refresh(); });
 
     $('#f-save').addEventListener('click', () => {
       const amount = num(amt.value);
@@ -843,7 +847,7 @@
       if (n > 1) {
         cuota = num(cuotaIn.value) || estimate();
         if (!cuota) { cuotaIn.focus(); toast('Escribe el valor de la cuota'); return; }
-        interest = Math.max(0, cuota * n - amount);
+        interest = cuota * n - amount > n ? cuota * n - amount : 0; // diferencias de redondeo no son interés
       }
       const d = parseYmd($('#f-date').value || ymd(new Date()));
       const now = new Date();
@@ -939,22 +943,26 @@
     title: pl ? 'Editar compra en cuotas' : 'Nueva compra en cuotas',
     fields: [
       { key: 'name', label: 'Qué compraste', value: pl && pl.name, ph: 'Ej: Sodimac, zapatillas…', required: true },
+      { key: 'price', label: 'Monto total de la compra ($)', money: true, value: pl && pl.price },
       { key: 'n', label: 'Cantidad de cuotas', money: true, value: pl && pl.n },
-      { key: 'value', label: 'Valor de cada cuota ($)', money: true, value: pl && pl.value },
+      { key: 'value', label: 'Valor de cada cuota ($) · vacío = se calcula solo (monto ÷ cuotas)', money: true, value: pl && pl.value },
       ...(pl && pl.expId ? [] : [{ key: 'first', label: 'Mes en que vence la primera cuota', type: 'month', value: pl ? pl.first : stmtDueMonth(new Date()) }]),
-      { key: 'price', label: 'Precio sin interés ($, opcional: calcula el interés)', money: true, value: pl && pl.price },
     ],
     hint: (v) => {
-      if (!v.n || !v.value) return '';
-      const tot = v.n * v.value, it = v.price ? tot - v.price : 0;
-      return `Pagarás ${v.n} × ${clp(v.value)} = ${clp(tot)}` + (v.price ? (it > 0 ? ` · intereses ${clp(it)} (${((it / v.price) * 100).toFixed(1).replace('.', ',')}%)` : ' · sin intereses') : '');
+      if (!v.n) return '';
+      const value = v.value || (v.price ? Math.round(v.price / v.n) : 0);
+      if (!value) return '';
+      const tot = v.n * value, it = v.price ? tot - v.price : 0;
+      return (v.value ? '' : 'Cuota calculada solo: monto ÷ cuotas. ') + `Pagarás ${v.n} × ${clp(value)} = ${clp(tot)}` +
+        (v.price ? (it > v.n ? ` · intereses ${clp(it)} (${((it / v.price) * 100).toFixed(1).replace('.', ',')}%)` : ' · sin intereses') : '');
     },
-    validate: (v) => (!v.n || v.n < 2 || v.n > 60 ? 'La cantidad de cuotas va entre 2 y 60' : !v.value ? 'Falta el valor de cada cuota' : !(pl && pl.expId) && !v.first ? 'Falta el mes de la primera cuota' : ''),
+    validate: (v) => (!v.n || v.n < 2 || v.n > 60 ? 'La cantidad de cuotas va entre 2 y 60' : !v.value && !v.price ? 'Escribe el monto total o el valor de cada cuota' : !(pl && pl.expId) && !v.first ? 'Falta el mes de la primera cuota' : ''),
     onSave: (v) => {
+      if (!v.value && v.price) v.value = Math.round(v.price / v.n); // cálculo automático
       const rec = { ...(pl || {}), id: pl ? pl.id : uid(), ...v };
       S.cmr.plans = pl ? S.cmr.plans.map((x) => (x.id === pl.id ? rec : x)) : [...S.cmr.plans, rec];
       const e = pl && pl.expId && S.expenses.find((x) => x.id === pl.expId); // el gasto de origen se mantiene igual
-      if (e) { e.cuotas = v.n; e.cuota = v.value; if (v.price) e.amount = v.price; e.interest = Math.max(0, v.n * v.value - e.amount); }
+      if (e) { e.cuotas = v.n; e.cuota = v.value; if (v.price) e.amount = v.price; e.interest = v.n * v.value - e.amount > v.n ? v.n * v.value - e.amount : 0; }
     },
     // si la compra viene de un gasto anotado, se elimina borrando ese gasto (en Gastos)
     onDelete: pl && !pl.expId ? () => { S.cmr.plans = S.cmr.plans.filter((x) => x.id !== pl.id); } : null,
