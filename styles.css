@@ -218,6 +218,7 @@ body.sheet-open .fab, .fab[hidden] { display: none; } /* el atributo hidden no g
 .btn { height: 48px; padding: 0 18px; border-radius: 14px; border: 1px solid var(--line); background: var(--card); font-weight: 700; }
 .btn.primary { background: var(--accent-fill); color: var(--accent-ink); border-color: transparent; }
 .btn.danger { color: var(--bad); }
+.btn[aria-pressed="true"] { background: var(--ok-soft); color: var(--ok); border-color: transparent; } /* "✓ Listo" en Pagos del mes */
 .btn.small { height: 38px; padding: 0 14px; font-size: 14px; border-radius: 12px; }
 .btn.block { width: 100%; }
 .row { display: flex; gap: 10px; margin-top: 14px; }

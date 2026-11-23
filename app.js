@@ -50,8 +50,9 @@
     fixed: [],
     expenses: [],
     goals: [],
-    cmr: { fees: 0, limit: 0, used: 0, usedAt: '', rate: 0, items: [], history: [], last: null },
+    cmr: { fees: 0, limit: 0, used: 0, usedAt: '', rate: 0, items: [], history: [], last: null, stmts: [], payments: [] },
     done: {},
+    paid: {}, // pagos del mes marcados como listos, por período
     last: { cat: 'super', method: 'cc' },
   });
 
@@ -70,6 +71,7 @@
       expenses: raw.expenses || [],
       goals: raw.goals || [],
       done: raw.done || {},
+      paid: raw.paid || {},
     };
   }
 
@@ -108,14 +110,60 @@
   }
 
   const cmrDueDate = (ym) => { const [y, m] = ym.split('-').map(Number); return new Date(y, m - 1, S.settings.cmrDue); };
-  const cmrDueIn = (p) =>
-    S.cmr.items.filter((it) => { const d = cmrDueDate(it.month); return d >= p.start && d < p.end; }).reduce((a, i) => a + i.amount, 0) + (S.cmr.fees || 0);
+  const ymOf = (d) => d.getFullYear() + '-' + pad(d.getMonth() + 1);
+  const stmtOf = (ym) => S.cmr.stmts.find((s) => s.month === ym);
+  const paidFor = (ym) => S.cmr.payments.filter((x) => x.month === ym).reduce((a, x) => a + x.amount, 0);
+  const itemsIn = (ym) => S.cmr.items.filter((i) => i.month === ym).reduce((a, i) => a + i.amount, 0);
+  const cmrExpOf = (ym) => S.expenses.filter((e) => e.method === 'cmr' && stmtDueMonth(new Date(e.ts)) === ym);
+  const inPlan = (e) => !S.settings.planStart || e.ts >= +parseYmd(S.settings.planStart);
+
+  // Meses de la CMR cuyo vencimiento cae dentro del período
+  function dueMonthsIn(p) {
+    const base = ymOf(p.start), out = [];
+    for (let k = -1; k <= 2; k++) { const ym = addMonths(base, k), d = cmrDueDate(ym); if (d >= p.start && d < p.end) out.push(ym); }
+    return out;
+  }
+  // Lo que ese vencimiento descuenta del sueldo. Si anotaste el estado de cuenta se usa el monto real,
+  // menos las compras con CMR que ya descontaste de tus semanas (para no contarlas dos veces).
+  function cmrBudgetFor(ym) {
+    const st = stmtOf(ym);
+    if (!st) return itemsIn(ym) + (S.cmr.fees || 0);
+    const counted = cmrExpOf(ym).filter((e) => inPlan(e) && livingExp(e)).reduce((s, e) => s + cost(e), 0);
+    return Math.max(0, st.billed - counted);
+  }
+  // Lo que vas a pagar en el banco ese mes (estimado si aún no anotas el estado de cuenta)
+  function cmrBill(ym) {
+    const st = stmtOf(ym);
+    if (st) return { amount: st.billed, real: true };
+    return { amount: itemsIn(ym) + (S.cmr.fees || 0) + cmrExpOf(ym).reduce((s, e) => s + cost(e), 0), real: false };
+  }
+  const cmrDueIn = (p) => dueMonthsIn(p).reduce((a, ym) => a + cmrBudgetFor(ym), 0);
+
+  // Cupo usado hoy: el dato del banco + compras con CMR anotadas después − pagos registrados después + seguros en cada cierre
+  function cupoNow() {
+    const c = S.cmr;
+    if (!c.usedAt) return { used: c.used, est: false };
+    const from = addDays(parseYmd(c.usedAt), 1), today = sod(new Date());
+    const pays = c.payments.filter((x) => parseYmd(x.date) >= from).reduce((a, x) => a + x.amount, 0);
+    const buys = S.expenses.filter((e) => e.method === 'cmr' && e.ts >= +from).reduce((s, e) => s + (e.cuotas > 1 && e.cuota ? e.cuota * e.cuotas : e.amount), 0);
+    let closes = 0;
+    for (let d = new Date(from.getFullYear(), from.getMonth(), S.settings.cmrClose); d <= today; d = new Date(d.getFullYear(), d.getMonth() + 1, S.settings.cmrClose)) if (d >= from) closes++;
+    return { used: Math.max(0, c.used - pays + buys + closes * (c.fees || 0)), est: !!(pays || buys || closes) };
+  }
+  // Estado de cuenta que normalmente estás pagando ahora (el último que cerró)
+  function defaultPayMonth() {
+    const now = new Date(), cd = S.settings.cmrClose;
+    let c = new Date(now.getFullYear(), now.getMonth(), cd);
+    if (sod(now) < c) c = new Date(now.getFullYear(), now.getMonth() - 1, cd);
+    return stmtDueMonth(c);
+  }
 
   // Compras con CMR hechas ANTES de que parta el plan: se pagan con el sueldo nuevo (p. ej. el 25 de nov) y no se descontaron de ningún período del plan.
+  // Si ya anotaste el estado de cuenta de ese mes, van incluidas en su monto.
   function carryIn(p) {
     if (!S.settings.planStart) return 0;
     const ps = +parseYmd(S.settings.planStart);
-    return S.expenses.filter((e) => e.method === 'cmr' && e.ts < ps).filter((e) => {
+    return S.expenses.filter((e) => e.method === 'cmr' && e.ts < ps && !stmtOf(stmtDueMonth(new Date(e.ts)))).filter((e) => {
       const d = cmrDueDate(stmtDueMonth(new Date(e.ts)));
       return d >= p.start && d < p.end;
     }).reduce((s, e) => s + cost(e), 0);
@@ -263,6 +311,25 @@
           <div class="kv"><span>Promedio por día</span><b class="num">${clp(Math.max(0, leftP) / daysLeft)}</b></div></div>`;
       }
 
+      // Pagos del mes: marca lo que ya pagaste o transferiste (se reinicia en cada período)
+      const paidL = S.paid[p.key] || [];
+      const rows = S.fixed.map((f) => {
+        const ok = paidL.includes(f.id);
+        return `<div class="check"><div class="grow"><b>${esc(f.name)}</b></div><b class="num">${clp(f.amount)}</b>
+          <button class="btn small" data-act="paid-toggle" data-id="${f.id}" data-pk="${p.key}" aria-pressed="${ok}">${ok ? '✓ Listo' : 'Pagado'}</button></div>`;
+      });
+      let nOk = S.fixed.filter((f) => paidL.includes(f.id)).length, nTot = S.fixed.length;
+      dueMonthsIn(p).forEach((ym) => {
+        const bill = cmrBill(ym);
+        if (!bill.amount) return;
+        const paid = paidFor(ym), ok = paid >= bill.amount;
+        nTot++; if (ok) nOk++;
+        rows.push(`<div class="check"><div class="grow"><b>Tarjeta CMR</b><div class="small muted">vence el ${dlabel(cmrDueDate(ym))}${bill.real ? '' : ' · estimado'}${paid && !ok ? ' · pagaste ' + clp(paid) : ''}</div></div>
+          <b class="num">${clp(bill.amount)}</b>
+          ${ok ? '<span class="tag ok">✓ Pagada</span>' : `<button class="btn small" data-act="pay-new" data-id="${ym}">Pagado</button>`}</div>`);
+      });
+      if (rows.length) h += `<div class="card"><h2>Pagos del mes · ${nOk} de ${nTot}</h2>${rows.join('')}</div>`;
+
       // Ahorro del período
       const done = S.done[p.key] || [];
       const gl = S.goals.filter((g) => g.monthly > 0);
@@ -304,10 +371,15 @@
         : '<p class="muted">Aún no hay gastos anotados en este período.</p>') + '</div>';
 
     // CMR
-    const nextDue = S.cmr.items.map((i) => ({ ...i, d: cmrDueDate(i.month) })).filter((i) => i.d >= sod(now)).sort((a, b2) => a.d - b2.d)[0];
-    if (nextDue) {
-      h += `<div class="card"><h2>Próximo pago CMR</h2><div class="kv"><span>Vence el ${dlabel(nextDue.d)}</span><b class="num">${clp(nextDue.amount + (S.cmr.fees || 0))}</b></div>
-        <p class="small muted">Cuotas ya hechas${S.cmr.fees ? ' + seguros y comisión' : ''}. Sin compras nuevas en cuotas.</p></div>`;
+    const nextYm = [-1, 0, 1, 2].map((k) => addMonths(ymOf(now), k))
+      .filter((ym) => cmrDueDate(ym) >= addDays(sod(now), -7))
+      .find((ym) => { const bl = cmrBill(ym); return bl.amount > 0 && paidFor(ym) < bl.amount; });
+    if (nextYm) {
+      const bill = cmrBill(nextYm), paid = paidFor(nextYm), d = cmrDueDate(nextYm), late = d < sod(now);
+      h += `<div class="card"><h2>Próximo pago CMR</h2>
+        <div class="kv"><span>${late ? 'Venció' : 'Vence'} el ${dlabel(d)}</span><b class="num" style="${late ? 'color:var(--bad)' : ''}">${clp(bill.amount - paid)}</b></div>
+        <p class="small muted">${bill.real ? 'Según tu estado de cuenta' : 'Estimado: cuotas, seguros y compras con CMR que anotaste'}${paid ? ` · ya pagaste ${clp(paid)}` : ''}.</p>
+        <div class="row"><button class="btn small" data-act="pay-new" data-id="${nextYm}">Registrar pago</button></div></div>`;
     }
     return h;
   }
@@ -438,7 +510,7 @@
     const cuotas = items.filter((i) => i.month === dueMonth).reduce((a, i) => a + i.amount, 0);
     const fees = S.cmr.fees || 0;
     const est = cuotas + fees + purchases;
-    const pend = items.reduce((a, i) => a + i.amount, 0);
+    const pend = items.filter((i) => !stmtOf(i.month)).reduce((a, i) => a + i.amount, 0);
 
     let h = `<div class="card"><h2>Próximo estado de cuenta</h2>
       <p class="small muted">Cierra el ${dlabel(close)} · vence el ${dlabel(cmrDueDate(dueMonth))}</p>
@@ -450,15 +522,33 @@
 
     const c = S.cmr;
     if (c.limit) {
-      const pct = Math.min(100, (c.used / c.limit) * 100);
+      const u = cupoNow();
+      const pct = Math.min(100, (u.used / c.limit) * 100);
       h += `<div class="card"><h2>Tu cupo</h2>
         <div class="kv"><span>Cupo total</span><b class="num">${clp(c.limit)}</b></div>
-        <div class="kv"><span>Usado${c.usedAt ? ' al ' + dlabel(parseYmd(c.usedAt)) : ''}</span><b class="num">${clp(c.used)} · ${Math.round(pct)}%</b></div>
+        <div class="kv"><span>Usado hoy${u.est ? ' (estimado)' : ''}</span><b class="num">${clp(u.used)} · ${Math.round(pct)}%</b></div>
         <div class="bar" style="margin:6px 0 4px"><i style="width:${pct}%"></i></div>
-        <div class="kv"><span>Disponible</span><b class="num">${clp(c.limit - c.used)}</b></div>
+        <div class="kv"><span>Disponible</span><b class="num">${clp(c.limit - u.used)}</b></div>
         ${c.rate ? `<div class="kv"><span>Interés mensual al comprar en cuotas</span><b>${String(c.rate).replace('.', ',')}%</b></div>` : ''}
-        <p class="small muted">El cupo usado incluye las cuotas futuras de lo que ya compraste.</p></div>`;
+        <p class="small muted">${c.usedAt ? `Parte del dato del banco (${clp(c.used)} al ${dlabel(parseYmd(c.usedAt))}), suma tus compras con CMR anotadas y los seguros de cada cierre, y resta tus pagos registrados. Si no cuadra con la app del banco, actualiza el dato en Plan.` : 'El cupo usado incluye las cuotas futuras de lo que ya compraste.'}</p></div>`;
     }
+
+    // Historial: estados de cuenta y pagos
+    const months = [...new Set(c.stmts.map((s) => s.month).concat(c.payments.map((x) => x.month)))].sort().reverse();
+    h += `<div class="card"><h2>Estados de cuenta y pagos</h2>` +
+      (months.length ? months.map((ym, i) => {
+        const st = stmtOf(ym), pays = c.payments.filter((x) => x.month === ym).sort((a, b2) => a.date.localeCompare(b2.date));
+        const paid = pays.reduce((a, x) => a + x.amount, 0);
+        const prev = months[i + 1] && stmtOf(months[i + 1]);
+        const diff = st && prev && prev.billed ? Math.round(((st.billed - prev.billed) / prev.billed) * 100) : null;
+        const status = st ? (paid >= st.billed ? '<span class="tag ok">✓ Pagado</span>' : `<span class="tag warn">Falta ${clp(st.billed - paid)}</span>`) : '';
+        return `<div class="check"><div class="grow"><b>Estado ${mlabel(ym)}</b><div class="small muted">vence el ${dlabel(cmrDueDate(ym))}${st && st.min ? ' · mínimo ' + clp(st.min) : ''}${diff !== null ? ` · ${diff >= 0 ? 'subió' : 'bajó'} ${Math.abs(diff)}% vs el anterior` : ''}</div>${status}</div>
+            <b class="num">${st ? clp(st.billed) : ''}</b>
+            ${st ? `<button class="btn small" data-act="stmt-edit" data-id="${st.id}">Editar</button>` : `<button class="btn small" data-act="stmt-new" data-id="${ym}">Anotar monto</button>`}</div>` +
+          pays.map((x) => `<div class="check"><div class="grow"><span class="small">↳ Pagaste el ${dlabel(parseYmd(x.date))} ${parseYmd(x.date).getFullYear()}</span></div>
+            <b class="num">${clp(x.amount)}</b><button class="btn small" data-act="pay-edit" data-id="${x.id}">Editar</button></div>`).join('');
+      }).join('') : '<p class="muted small">Anota cada estado de cuenta (el "Monto facturado" del banco) y cada pago para llevar tu historial.</p>') +
+      '<div class="row"><button class="btn small" data-act="stmt-new">+ Estado de cuenta</button><button class="btn small" data-act="pay-new">+ Pago</button></div></div>';
 
     if (c.last && c.last.parts && c.last.parts.length) {
       const L = c.last, mx = Math.max(...L.parts.map((x) => x.amount));
@@ -479,7 +569,7 @@
     }
 
     h += `<div class="card"><h2>Cuotas pendientes</h2>` +
-      (items.length ? items.map((i) => `<div class="check"><div class="grow"><b>${esc(i.name)}</b><div class="small muted">vence ${dlabel(cmrDueDate(i.month))} ${cmrDueDate(i.month).getFullYear()}</div></div>
+      (items.length ? items.map((i) => `<div class="check"><div class="grow"><b>${esc(i.name)}</b><div class="small muted">vence ${dlabel(cmrDueDate(i.month))} ${cmrDueDate(i.month).getFullYear()}${stmtOf(i.month) ? ' · ya va incluida en el estado de cuenta' : ''}</div></div>
         <b class="num">${clp(i.amount)}</b><button class="btn small" data-act="cmr-edit" data-id="${i.id}">Editar</button></div>`).join('') +
         `<div class="kv total"><span>Total pendiente</span><b class="num">${clp(pend)}</b></div>` : '<p class="muted">No tienes cuotas pendientes. 🎉</p>') +
       '<div class="row"><button class="btn small" data-act="cmr-new">+ Agregar cuota</button></div></div>';
@@ -495,7 +585,7 @@
     return `<h2>Resultado · período del ${dlabel(p.start)}</h2>
       <div class="kv"><span>Sueldo</span><b class="num">${clp(b.income)}</b></div>
       <div class="kv"><span>Gastos fijos</span><b class="num">-${fmt(b.fixed)}</b></div>
-      <div class="kv"><span>CMR (cuotas + seguros)</span><b class="num">-${fmt(b.cmr)}</b></div>
+      <div class="kv"><span>CMR a pagar en este período</span><b class="num">-${fmt(b.cmr)}</b></div>
       ${b.carry > 0 ? `<div class="kv"><span>CMR: compras antes del plan</span><b class="num">-${fmt(b.carry)}</b></div>` : ''}
       <div class="kv"><span>Ahorro (${s.savingsPct}%)</span><b class="num">-${fmt(b.saving)}</b></div>
       <div class="kv total"><span>Para vivir</span><b class="num">${clp(b.living)}</b></div>
@@ -528,8 +618,8 @@
       ${inp('Día de cierre del estado', 'settings.cmrClose', s.cmrClose, 'inputmode="numeric"')}
       ${inp('Día de vencimiento', 'settings.cmrDue', s.cmrDue, 'inputmode="numeric"')}
       ${inp('Cupo total ($)', 'cmr.limit', S.cmr.limit ? fmt(S.cmr.limit) : '', 'inputmode="numeric"')}
-      ${inp('Cupo utilizado al último cierre ($)', 'cmr.used', S.cmr.used ? fmt(S.cmr.used) : '', 'inputmode="numeric"')}
-      <label class="field"><span>Fecha de ese cierre</span><input type="date" data-set="cmr.usedAt" value="${esc(S.cmr.usedAt || '')}"></label>
+      ${inp('Cupo utilizado según la app del banco ($)', 'cmr.used', S.cmr.used ? fmt(S.cmr.used) : '', 'inputmode="numeric"')}
+      <label class="field"><span>Fecha de ese dato</span><input type="date" data-set="cmr.usedAt" value="${esc(S.cmr.usedAt || '')}"></label>
       ${inp('Tasa mensual por cuotas (%)', 'cmr.rate', S.cmr.rate || '', 'inputmode="decimal"')}</div>`;
 
     h += `<div class="card"><h2>Gasto hormiga</h2>
@@ -777,6 +867,40 @@
     });
   };
 
+  // Estado de cuenta: el "Monto facturado" que muestra el banco cada mes
+  const editStmt = (st, ym) => openForm({
+    title: st ? 'Editar estado de cuenta' : 'Estado de cuenta CMR',
+    fields: [
+      { key: 'month', label: 'Mes en que vence', type: 'month', value: st ? st.month : ym || defaultPayMonth() },
+      { key: 'billed', label: 'Monto facturado ($)', money: true, value: st && st.billed },
+      { key: 'min', label: 'Pago mínimo ($, opcional)', money: true, value: st && st.min },
+    ],
+    validate: (v) => !v.month ? 'Falta el mes' : !v.billed ? 'Falta el monto facturado'
+      : S.cmr.stmts.some((x) => x.month === v.month && (!st || x.id !== st.id)) ? 'Ya anotaste el estado de ese mes: edítalo' : '',
+    onSave: (v) => { const rec = { ...(st || {}), id: st ? st.id : uid(), ...v }; S.cmr.stmts = st ? S.cmr.stmts.map((x) => (x.id === st.id ? rec : x)) : [...S.cmr.stmts, rec]; },
+    onDelete: st ? () => { S.cmr.stmts = S.cmr.stmts.filter((x) => x.id !== st.id); } : null,
+  });
+
+  // Pago de la tarjeta
+  const editPay = (x, ym) => {
+    const m = x ? x.month : ym || defaultPayMonth();
+    openForm({
+      title: x ? 'Editar pago CMR' : 'Registrar pago CMR',
+      fields: [
+        { key: 'amount', label: 'Monto pagado ($)', money: true, value: x ? x.amount : Math.max(0, cmrBill(m).amount - paidFor(m)) },
+        { key: 'date', label: 'Fecha del pago', type: 'date', value: x ? x.date : ymd(new Date()) },
+        { key: 'month', label: 'Estado que pagas (mes en que vence)', type: 'month', value: m },
+      ],
+      validate: (v) => !v.amount ? 'Falta el monto' : !v.date ? 'Falta la fecha' : !v.month ? 'Falta el mes' : '',
+      onSave: (v) => {
+        const rec = { ...(x || {}), id: x ? x.id : uid(), ...v };
+        S.cmr.payments = x ? S.cmr.payments.map((y) => (y.id === x.id ? rec : y)) : [...S.cmr.payments, rec];
+        toast(`Pago de ${clp(v.amount)} anotado`);
+      },
+      onDelete: x ? () => { S.cmr.payments = S.cmr.payments.filter((y) => y.id !== x.id); } : null,
+    });
+  };
+
   const editBonus = (bn) => {
     const d = new Date();
     openForm({
@@ -857,6 +981,16 @@
       case 'fixed-edit': editFixed(S.fixed.find((x) => x.id === id)); break;
       case 'cmr-new': editCmr(); break;
       case 'cmr-edit': editCmr(S.cmr.items.find((x) => x.id === id)); break;
+      case 'stmt-new': editStmt(null, id); break;
+      case 'stmt-edit': editStmt(S.cmr.stmts.find((x) => x.id === id)); break;
+      case 'pay-new': editPay(null, id); break;
+      case 'pay-edit': editPay(S.cmr.payments.find((x) => x.id === id)); break;
+      case 'paid-toggle': {
+        const pk = el.dataset.pk, l = (S.paid[pk] = S.paid[pk] || []), i = l.indexOf(id);
+        if (i >= 0) l.splice(i, 1); else l.push(id);
+        save(); render(true);
+        break;
+      }
       case 'export': exportData(); break;
       case 'import': $('#file-import').click(); break;
       case 'reset':
