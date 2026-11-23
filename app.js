@@ -50,7 +50,7 @@
     fixed: [],
     expenses: [],
     goals: [],
-    cmr: { fees: 0, limit: 0, used: 0, usedAt: '', rate: 0, items: [], history: [], last: null, stmts: [], payments: [] },
+    cmr: { fees: 0, limit: 0, used: 0, usedAt: '', rate: 0, items: [], plans: [], history: [], last: null, stmts: [], payments: [] },
     done: {},
     paid: {}, // pagos del mes marcados como listos, por período
     last: { cat: 'super', method: 'cc' },
@@ -77,8 +77,21 @@
 
   let S;
   try { S = normalize(JSON.parse(localStorage.getItem(KEY))); } catch (e) { S = defaults(); }
+  // Datos antiguos: cuotas sueltas ligadas a un gasto pasan a ser un plan; planes mal formados se descartan
+  function migrate() {
+    const ids = [...new Set(S.cmr.items.filter((i) => i.expId).map((i) => i.expId))];
+    ids.forEach((id) => {
+      const e = S.expenses.find((x) => x.id === id);
+      if (e && e.cuotas > 1 && !S.cmr.plans.some((pl) => pl.expId === id)) {
+        S.cmr.plans.push({ id: uid(), expId: id, name: e.note || catOf(e.cat).name, n: e.cuotas, value: e.cuota, first: stmtDueMonth(new Date(e.ts)), price: e.amount });
+      }
+    });
+    S.cmr.items = S.cmr.items.filter((i) => !i.expId);
+    S.cmr.plans = S.cmr.plans.filter((pl) => pl && /^\d{4}-\d{2}$/.test(pl.first) && pl.n >= 2 && pl.n <= 60 && pl.value > 0);
+  }
   const save = () => { try { localStorage.setItem(KEY, JSON.stringify(S)); } catch (e) { toast('No pude guardar en este navegador'); } };
 
+  migrate(); save(); // deja guardados los datos ya migrados
   const G = { mode: 'lista', off: 0 }; // estado de la vista Gastos
 
   // Temas de color (los estilos están en styles.css según <html data-theme>)
@@ -113,7 +126,28 @@
   const ymOf = (d) => d.getFullYear() + '-' + pad(d.getMonth() + 1);
   const stmtOf = (ym) => S.cmr.stmts.find((s) => s.month === ym);
   const paidFor = (ym) => S.cmr.payments.filter((x) => x.month === ym).reduce((a, x) => a + x.amount, 0);
-  const itemsIn = (ym) => S.cmr.items.filter((i) => i.month === ym).reduce((a, i) => a + i.amount, 0);
+  /* Compras en cuotas de la CMR: cada "plan" tiene cantidad de cuotas, valor de cada una y mes de la primera.
+     Las cuotas se derivan del plan (no se guardan una por una). */
+  const planFirst = (pl) => { const e = pl.expId && S.expenses.find((x) => x.id === pl.expId); return e ? stmtDueMonth(new Date(e.ts)) : pl.first; };
+  const planCuotas = (pl) => Array.from({ length: pl.n }, (_, i) => ({ k: i + 1, month: addMonths(planFirst(pl), i), amount: pl.value }));
+  // Una cuota está pagada si el estado de ese mes ya quedó pagado; sin estado anotado, si su vencimiento ya pasó.
+  const cuotaPaid = (ym) => {
+    const st = stmtOf(ym), due = cmrDueDate(ym) < sod(new Date());
+    if (!st) return due;
+    return paidFor(ym) >= st.billed || (due && S.cmr.payments.some((x) => x.month > ym));
+  };
+  const planStatus = (pl) => {
+    const cs = planCuotas(pl).map((c) => ({ ...c, paid: cuotaPaid(c.month) }));
+    const paid = cs.filter((c) => c.paid);
+    const left = cs.filter((c) => !c.paid);
+    return { cs, paid: paid.length, left: left.length, leftAmount: left.reduce((a, c) => a + c.amount, 0), next: left[0] || null };
+  };
+  // Cuotas que descuentan del presupuesto: las sueltas más las de cada plan (si el plan viene de un gasto anotado, su
+  // primera cuota ya se descontó de tu semana al comprar, así que no se repite).
+  const allItems = () => S.cmr.items.concat(S.cmr.plans.flatMap((pl) => planCuotas(pl)
+    .filter((c) => !(pl.expId && c.k === 1))
+    .map((c) => ({ id: pl.id + ':' + c.k, planId: pl.id, name: pl.name + ' ' + c.k + '/' + pl.n, amount: c.amount, month: c.month }))));
+  const itemsIn = (ym) => allItems().filter((i) => i.month === ym).reduce((a, i) => a + i.amount, 0);
   const cmrExpOf = (ym) => S.expenses.filter((e) => e.method === 'cmr' && stmtDueMonth(new Date(e.ts)) === ym);
   const inPlan = (e) => !S.settings.planStart || e.ts >= +parseYmd(S.settings.planStart);
 
@@ -127,7 +161,7 @@
   // menos las compras con CMR que ya descontaste de tus semanas (para no contarlas dos veces).
   function cmrBudgetFor(ym) {
     const st = stmtOf(ym);
-    if (!st) return itemsIn(ym) + (S.cmr.fees || 0);
+    if (!st) return itemsIn(ym) + (S.cmr.fees || 0) + cmrExpOf(ym).filter((e) => inPlan(e) && !livingExp(e)).reduce((s, e) => s + cost(e), 0);
     const counted = cmrExpOf(ym).filter((e) => inPlan(e) && livingExp(e)).reduce((s, e) => s + cost(e), 0);
     return Math.max(0, st.billed - counted);
   }
@@ -244,13 +278,13 @@
     if (S.settings.cmrDue <= cd) c = new Date(c.getFullYear(), c.getMonth() + 1, 1);
     return c.getFullYear() + '-' + pad(c.getMonth() + 1);
   }
+  // Un gasto con CMR en cuotas crea (o actualiza) su plan de cuotas
   function syncCuotaItems(rec) {
     S.cmr.items = S.cmr.items.filter((i) => i.expId !== rec.id);
+    const old = S.cmr.plans.find((pl) => pl.expId === rec.id);
+    S.cmr.plans = S.cmr.plans.filter((pl) => pl.expId !== rec.id);
     if (rec.method === 'cmr' && rec.cuotas > 1) {
-      const base = stmtDueMonth(new Date(rec.ts));
-      for (let k = 1; k < rec.cuotas; k++) {
-        S.cmr.items.push({ id: uid(), expId: rec.id, name: (rec.note || catOf(rec.cat).name) + ' ' + (k + 1) + '/' + rec.cuotas, amount: rec.cuota, month: addMonths(base, k) });
-      }
+      S.cmr.plans.push({ id: old ? old.id : uid(), expId: rec.id, name: rec.note || catOf(rec.cat).name, n: rec.cuotas, value: rec.cuota, first: stmtDueMonth(new Date(rec.ts)), price: rec.amount });
     }
   }
   const weekStart = (d = new Date()) => addDays(sod(d), -((sod(d).getDay() + 6) % 7));
@@ -500,17 +534,18 @@
   }
 
   function vCmr() {
-    const items = [...S.cmr.items].sort((a, b) => a.month.localeCompare(b.month));
+    const items = allItems().sort((a, b) => a.month.localeCompare(b.month));
+    const legacy = [...S.cmr.items].sort((a, b) => a.month.localeCompare(b.month)); // cuotas sueltas
     const now = new Date(), cd = S.settings.cmrClose;
     let close = new Date(now.getFullYear(), now.getMonth(), cd);
     if (sod(now) > close) close = new Date(now.getFullYear(), now.getMonth() + 1, cd);
     const prev = new Date(close.getFullYear(), close.getMonth() - 1, cd);
     const purchases = expIn(addDays(prev, 1), addDays(close, 1), (e) => e.method === 'cmr').reduce((s, e) => s + cost(e), 0);
-    const dueMonth = close.getFullYear() + '-' + pad(close.getMonth() + 1);
+    const dueMonth = stmtDueMonth(close);
     const cuotas = items.filter((i) => i.month === dueMonth).reduce((a, i) => a + i.amount, 0);
     const fees = S.cmr.fees || 0;
     const est = cuotas + fees + purchases;
-    const pend = items.filter((i) => !stmtOf(i.month)).reduce((a, i) => a + i.amount, 0);
+    const pend = legacy.filter((i) => !cuotaPaid(i.month)).reduce((a, i) => a + i.amount, 0) + S.cmr.plans.reduce((a, pl) => a + planStatus(pl).leftAmount, 0);
 
     let h = `<div class="card"><h2>Próximo estado de cuenta</h2>
       <p class="small muted">Cierra el ${dlabel(close)} · vence el ${dlabel(cmrDueDate(dueMonth))}</p>
@@ -568,11 +603,24 @@
         (first > 0 ? `<p class="small muted">${last >= first ? 'Subió' : 'Bajó'} ${Math.abs(Math.round(((last - first) / first) * 100))}% entre el primero y el último.</p>` : '') + '</div>';
     }
 
-    h += `<div class="card"><h2>Cuotas pendientes</h2>` +
-      (items.length ? items.map((i) => `<div class="check"><div class="grow"><b>${esc(i.name)}</b><div class="small muted">vence ${dlabel(cmrDueDate(i.month))} ${cmrDueDate(i.month).getFullYear()}${stmtOf(i.month) ? ' · ya va incluida en el estado de cuenta' : ''}</div></div>
-        <b class="num">${clp(i.amount)}</b><button class="btn small" data-act="cmr-edit" data-id="${i.id}">Editar</button></div>`).join('') +
-        `<div class="kv total"><span>Total pendiente</span><b class="num">${clp(pend)}</b></div>` : '<p class="muted">No tienes cuotas pendientes. 🎉</p>') +
-      '<div class="row"><button class="btn small" data-act="cmr-new">+ Agregar cuota</button></div></div>';
+    // Compras en cuotas: cantidad, valor de cada una, cuántas llevas pagadas y cuáles faltan
+    h += `<div class="card"><h2>Mis compras en cuotas</h2>` +
+      (S.cmr.plans.length ? S.cmr.plans.map((pl) => {
+        const s = planStatus(pl), pct = (s.paid / pl.n) * 100, tot = pl.value * pl.n, it = pl.price ? tot - pl.price : 0;
+        return `<details class="plan"><summary>
+            <div class="check" style="border:0;padding:6px 0"><div class="grow"><b>${esc(pl.name)}</b>
+              <div class="small muted">${pl.n} cuotas de ${clp(pl.value)}${it > 0 ? ' · interés ' + clp(it) : ''}</div></div>
+              <b class="num">${s.left ? 'Faltan ' + s.left : '✓ Terminada'}</b></div>
+            <div class="bar"><i style="width:${pct}%"></i></div>
+            <div class="small muted" style="margin-top:4px">Pagadas ${s.paid} de ${pl.n}${s.left ? ` · faltan ${clp(s.leftAmount)}${s.next ? ' · próxima el ' + dlabel(cmrDueDate(s.next.month)) : ''}` : ''}</div></summary>
+          ${s.cs.map((c) => `<div class="check"><div class="grow small">Cuota ${c.k} de ${pl.n} · ${dlabel(cmrDueDate(c.month))} ${cmrDueDate(c.month).getFullYear()}</div><b class="num small">${clp(c.amount)}</b>${c.paid ? '<span class="tag ok">✓ pagada</span>' : '<span class="tag warn">falta</span>'}</div>`).join('')}
+          <div class="row"><button class="btn small" data-act="plan-edit" data-id="${pl.id}">Editar</button></div></details>`;
+      }).join('') : '') +
+      (legacy.length ? '<div class="lbl">Cuotas sueltas</div>' + legacy.map((i) => `<div class="check"><div class="grow"><b>${esc(i.name)}</b><div class="small muted">vence ${dlabel(cmrDueDate(i.month))} ${cmrDueDate(i.month).getFullYear()}${stmtOf(i.month) ? ' · ya va incluida en el estado de cuenta' : ''}</div></div>
+        <b class="num">${clp(i.amount)}</b><button class="btn small" data-act="cmr-edit" data-id="${i.id}">Editar</button></div>`).join('') : '') +
+      (S.cmr.plans.length || legacy.length ? `<div class="kv total"><span>Falta por pagar</span><b class="num">${clp(pend)}</b></div>
+        <p class="small muted">Una cuota cuenta como pagada cuando llega su vencimiento, o antes si registras el pago de ese estado de cuenta. Toca una compra para ver cada cuota.</p>` : '<p class="muted">No tienes cuotas pendientes. 🎉</p>') +
+      '<div class="row"><button class="btn small" data-act="plan-new">+ Compra en cuotas</button><button class="btn small" data-act="cmr-new">+ Cuota suelta</button></div></div>';
 
     h += `<div class="card"><h2>Regla</h2><p>Usa la CMR solo para lo que ya ibas a gastar y págala <b>completa</b> cada mes. Las cuotas con interés te cuestan ~5% extra; solo vale la pena si dicen 0%.</p></div>`;
     return h;
@@ -664,7 +712,6 @@
     document.querySelectorAll('.tabs a').forEach((a) => {
       if (a.dataset.tab === r) a.setAttribute('aria-current', 'page'); else a.removeAttribute('aria-current');
     });
-    $('#fab').hidden = r === 'plan';
     if (keepScroll) window.scrollTo(0, y);
   }
 
@@ -711,7 +758,7 @@
       <p class="small muted" id="f-cat-hint" style="margin:6px 2px 0"></p>
       <div class="lbl">Pagué con</div><div class="chips" id="f-methods">${methodsList().map((m) => chip('method', m.id, esc(m.name), m.id === st.method)).join('')}</div>
       <div id="f-cmr-box" hidden>
-        <div class="lbl">¿En cuántas cuotas?</div>
+        <label class="field"><span>Cantidad de cuotas (1 = sin cuotas)</span><input id="f-n" inputmode="numeric" autocomplete="off" value="${st.n}"></label>
         <div class="chips">${[1, 2, 3, 6, 12, 18, 24].map((n) => chip('n', n, n === 1 ? 'Sin cuotas' : n, n === st.n)).join('')}</div>
         <div id="f-int-box" hidden>
           <div class="lbl">¿Con interés?</div>
@@ -741,7 +788,7 @@
     const refresh = () => {
       const isCmr = st.method === 'cmr';
       $('#f-cmr-box').hidden = !isCmr;
-      $('#f-int-box').hidden = !(isCmr && st.n > 1);
+      $('#f-int-box').hidden = !(isCmr && (st.n > 1 || st.typingN));
       if (isCmr && st.n > 1) {
         if (!st.cuotaManual) { const est = estimate(); cuotaIn.value = est ? fmt(est) : ''; }
         const P = num(amt.value), c = num(cuotaIn.value);
@@ -762,7 +809,7 @@
       if (!b) return;
       if (b.dataset.cat) { st.cat = b.dataset.cat; mark('[data-cat]', b); refresh(); }
       else if (b.dataset.method) { st.method = b.dataset.method; mark('[data-method]', b); refresh(); }
-      else if (b.dataset.n) { st.n = Number(b.dataset.n); st.cuotaManual = false; mark('[data-n]', b); refresh(); }
+      else if (b.dataset.n) { st.n = Number(b.dataset.n); $('#f-n').value = st.n; st.cuotaManual = false; mark('[data-n]', b); refresh(); }
       else if (b.dataset.int) { st.interest = b.dataset.int === '1'; st.cuotaManual = false; mark('[data-int]', b); refresh(); }
       else if (b.dataset.newcat) {
         const name = (prompt('Nombre de la etiqueta (ej: Luz, Agua, Gas, Peluquería)') || '').trim();
@@ -777,6 +824,15 @@
       }
     });
     amt.addEventListener('input', refresh);
+    // La cantidad de cuotas se puede escribir (hasta 60); los botones son atajos
+    $('#f-n').addEventListener('input', (ev) => {
+      const raw = ev.target.value, v = Math.min(60, Math.max(1, num(raw) || 1));
+      if (raw !== '' && String(v) !== raw) ev.target.value = v; // muestra lo que realmente se va a usar
+      st.n = v; st.cuotaManual = false; st.typingN = true;
+      form.querySelectorAll('[data-n]').forEach((x) => x.setAttribute('aria-pressed', String(Number(x.dataset.n) === v)));
+      refresh();
+    });
+    $('#f-n').addEventListener('blur', () => { st.typingN = false; $('#f-n').value = st.n; refresh(); });
     cuotaIn.addEventListener('input', () => { st.cuotaManual = true; refresh(); });
 
     $('#f-save').addEventListener('click', () => {
@@ -801,25 +857,36 @@
       const left = b.weekly - spendIn(ws, addDays(ws, 7));
       const what = n > 1 ? `${clp(amount)} en ${n} cuotas de ${clp(cuota)}` : clp(amount);
       toast(S.settings.income > 0 && !(preview && S.settings.bridgeAmount > 0) ? `Guardado ${what} · te quedan ${clp(left)} esta semana` : `Guardado ${what}`,
-        existing ? null : () => { S.expenses = S.expenses.filter((e) => e.id !== rec.id); S.cmr.items = S.cmr.items.filter((i) => i.expId !== rec.id); save(); render(true); });
+        existing ? null : () => { S.expenses = S.expenses.filter((e) => e.id !== rec.id); S.cmr.plans = S.cmr.plans.filter((pl) => pl.expId !== rec.id); S.cmr.items = S.cmr.items.filter((i) => i.expId !== rec.id); save(); render(true); });
     });
     const del = $('#f-del');
     if (del) del.addEventListener('click', () => {
-      const old = existing, oldItems = S.cmr.items.filter((i) => i.expId === old.id);
+      const old = existing, oldPlans = S.cmr.plans.filter((pl) => pl.expId === old.id), oldItems = S.cmr.items.filter((i) => i.expId === old.id);
       S.expenses = S.expenses.filter((e) => e.id !== old.id);
+      S.cmr.plans = S.cmr.plans.filter((pl) => pl.expId !== old.id);
       S.cmr.items = S.cmr.items.filter((i) => i.expId !== old.id);
       save(); closeSheet(); render(true);
-      toast('Gasto eliminado', () => { S.expenses.push(old); S.cmr.items.push(...oldItems); save(); render(true); });
+      toast('Gasto eliminado', () => { S.expenses.push(old); S.cmr.plans.push(...oldPlans); S.cmr.items.push(...oldItems); save(); render(true); });
     });
   }
 
   // Formulario genérico para metas, fijos y cuotas
-  function openForm({ title, fields, onSave, onDelete, validate }) {
+  function openForm({ title, fields, onSave, onDelete, validate, hint }) {
     openSheet(`<h2>${esc(title)}</h2>` + fields.map((f) => f.options
       ? `<label class="field"><span>${esc(f.label)}</span><select id="ff-${f.key}">${f.options.map(([val, lab]) => `<option value="${esc(val)}" ${val === f.value ? 'selected' : ''}>${esc(lab)}</option>`).join('')}</select></label>`
       : `<label class="field"><span>${esc(f.label)}</span><input id="ff-${f.key}" type="${f.type || 'text'}" ${f.money ? 'inputmode="numeric" autocomplete="off"' : ''} placeholder="${esc(f.ph || '')}" value="${esc(f.money ? (f.value ? fmt(f.value) : '') : f.value == null ? '' : f.value)}"></label>`).join('') +
+      (hint ? '<p class="small muted" id="ff-hint" style="margin:4px 2px 0"></p>' : '') +
       `<div class="row">${onDelete ? '<button class="btn danger" id="ff-del">Eliminar</button>' : '<button class="btn" data-act="close">Cancelar</button>'}<button class="btn primary" id="ff-save">Guardar</button></div>`);
     fields.filter((f) => f.money).forEach((f) => moneyInput($('#ff-' + f.key)));
+    if (hint) {
+      const upd = () => {
+        const v = {};
+        fields.forEach((f) => { const el = $('#ff-' + f.key); v[f.key] = f.money ? num(el.value) : el.value.trim(); });
+        $('#ff-hint').textContent = hint(v) || '';
+      };
+      fields.forEach((f) => $('#ff-' + f.key).addEventListener('input', upd));
+      upd();
+    }
     $('#ff-save').addEventListener('click', () => {
       const v = {};
       fields.forEach((f) => { const raw = $('#ff-' + f.key).value; v[f.key] = f.money ? num(raw) : raw.trim(); });
@@ -866,6 +933,32 @@
       onDelete: c ? () => { S.cmr.items = S.cmr.items.filter((x) => x.id !== c.id); } : null,
     });
   };
+
+  // Compra en cuotas de la CMR: cantidad de cuotas y valor de cada una
+  const editPlan = (pl) => openForm({
+    title: pl ? 'Editar compra en cuotas' : 'Nueva compra en cuotas',
+    fields: [
+      { key: 'name', label: 'Qué compraste', value: pl && pl.name, ph: 'Ej: Sodimac, zapatillas…', required: true },
+      { key: 'n', label: 'Cantidad de cuotas', money: true, value: pl && pl.n },
+      { key: 'value', label: 'Valor de cada cuota ($)', money: true, value: pl && pl.value },
+      ...(pl && pl.expId ? [] : [{ key: 'first', label: 'Mes en que vence la primera cuota', type: 'month', value: pl ? pl.first : stmtDueMonth(new Date()) }]),
+      { key: 'price', label: 'Precio sin interés ($, opcional: calcula el interés)', money: true, value: pl && pl.price },
+    ],
+    hint: (v) => {
+      if (!v.n || !v.value) return '';
+      const tot = v.n * v.value, it = v.price ? tot - v.price : 0;
+      return `Pagarás ${v.n} × ${clp(v.value)} = ${clp(tot)}` + (v.price ? (it > 0 ? ` · intereses ${clp(it)} (${((it / v.price) * 100).toFixed(1).replace('.', ',')}%)` : ' · sin intereses') : '');
+    },
+    validate: (v) => (!v.n || v.n < 2 || v.n > 60 ? 'La cantidad de cuotas va entre 2 y 60' : !v.value ? 'Falta el valor de cada cuota' : !(pl && pl.expId) && !v.first ? 'Falta el mes de la primera cuota' : ''),
+    onSave: (v) => {
+      const rec = { ...(pl || {}), id: pl ? pl.id : uid(), ...v };
+      S.cmr.plans = pl ? S.cmr.plans.map((x) => (x.id === pl.id ? rec : x)) : [...S.cmr.plans, rec];
+      const e = pl && pl.expId && S.expenses.find((x) => x.id === pl.expId); // el gasto de origen se mantiene igual
+      if (e) { e.cuotas = v.n; e.cuota = v.value; if (v.price) e.amount = v.price; e.interest = Math.max(0, v.n * v.value - e.amount); }
+    },
+    // si la compra viene de un gasto anotado, se elimina borrando ese gasto (en Gastos)
+    onDelete: pl && !pl.expId ? () => { S.cmr.plans = S.cmr.plans.filter((x) => x.id !== pl.id); } : null,
+  });
 
   // Estado de cuenta: el "Monto facturado" que muestra el banco cada mes
   const editStmt = (st, ym) => openForm({
@@ -935,7 +1028,7 @@
         const data = JSON.parse(r.result);
         if (!data || data.v !== 1) throw new Error('formato');
         if (!confirm('Esto reemplaza los datos que tienes en este dispositivo. ¿Continuar?')) return;
-        S = normalize(data); save(); render(); toast('Datos importados');
+        S = normalize(data); migrate(); save(); render(); toast('Datos importados');
       } catch (e) { toast('Ese archivo no es un respaldo válido'); }
     };
     r.readAsText(f);
@@ -979,6 +1072,8 @@
       case 'bonus-part': applyBonusPart(id, el.dataset.key); break;
       case 'fixed-new': editFixed(); break;
       case 'fixed-edit': editFixed(S.fixed.find((x) => x.id === id)); break;
+      case 'plan-new': editPlan(); break;
+      case 'plan-edit': editPlan(S.cmr.plans.find((x) => x.id === id)); break;
       case 'cmr-new': editCmr(); break;
       case 'cmr-edit': editCmr(S.cmr.items.find((x) => x.id === id)); break;
       case 'stmt-new': editStmt(null, id); break;
@@ -1048,17 +1143,31 @@
   // iPhone: ajusta la hoja al área realmente visible (el teclado no cambia el viewport normal) y muestra el campo enfocado
   if (window.visualViewport) {
     const vv = window.visualViewport;
+    let raf;
     const fit = () => {
-      const r = document.documentElement.style;
-      r.setProperty('--vvh', vv.height + 'px');
-      r.setProperty('--vvt', vv.offsetTop + 'px');
+      cancelAnimationFrame(raf);
+      raf = requestAnimationFrame(() => {
+        const r = document.documentElement.style, zoomed = vv.scale > 1.01; // con zoom de pellizco, pantalla completa
+        r.setProperty('--vvh', zoomed ? '100dvh' : vv.height + 'px');
+        r.setProperty('--vvt', zoomed ? '0px' : Math.max(0, vv.offsetTop) + 'px');
+      });
     };
     vv.addEventListener('resize', fit); vv.addEventListener('scroll', fit); fit();
   }
+  // Al enfocar un campo, desplaza SOLO la hoja (scrollIntoView movía también la página y descuadraba las capas en iOS)
   $('#sheet-body').addEventListener('focusin', (e) => {
     const t = e.target;
-    if (/^(INPUT|SELECT)$/.test(t.tagName)) setTimeout(() => t.scrollIntoView({ block: 'center', behavior: 'smooth' }), 250);
+    if (!/^(INPUT|SELECT)$/.test(t.tagName)) return;
+    setTimeout(() => {
+      const b = $('#sheet-body'), tr = t.getBoundingClientRect(), br = b.getBoundingClientRect();
+      b.scrollTo({ top: b.scrollTop + (tr.top - br.top) - br.height / 3, behavior: 'smooth' });
+    }, 250);
   });
+  // iOS antiguo ignora overflow:hidden en el body: evita que un gesto sobre el fondo mueva la página de atrás
+  $('#sheet').addEventListener('touchmove', (e) => {
+    const b = $('#sheet-body');
+    if (!e.target.closest('#sheet-body') || b.scrollHeight <= b.clientHeight) e.preventDefault();
+  }, { passive: false });
 
   if ('serviceWorker' in navigator && /^https?:$/.test(location.protocol) && location.hostname !== 'localhost') {
     navigator.serviceWorker.register('sw.js').catch(() => {});
